@@ -44,6 +44,17 @@ if ($unc -match '^\\\\([^\\]+)\\') {
     if ($tcp) { Line OK 'TCP 445 reachable' }
     elseif ($NetworkAccess -eq 'serviceEndpoint') { Line FAIL 'TCP 445 NOT reachable - check an NSG outbound rule allows 445 to the Storage service tag' }
     else { Line FAIL 'TCP 445 NOT reachable - NSG/firewall between hosts and the private endpoint' }
+
+    # SMB-level test. This runs as SYSTEM, which has no Entra Kerberos ticket, so an
+    # authentication error is EXPECTED and proves SMB reached the share; 53/67 means it didn't.
+    $share = ($unc -split '\\' | Where-Object { $_ })[1]
+    # stdin from nul so net use can never sit waiting at a credential prompt
+    $nu = (cmd.exe /c "net use \\$fqdn\$share /persistent:no < nul 2>&1") -join ' '
+    $null = cmd.exe /c "net use \\$fqdn\$share /delete /y 2>&1"
+    $smbCode = if ($nu -match 'System error (\d+)') { $Matches[1] } else { '0' }
+    if ($smbCode -in @('53', '67')) { Line FAIL "SMB to \\$fqdn\$share failed with error $smbCode (network path/name not found) although TCP 445 is open - check the share name and that nothing inspects/blocks SMB" }
+    elseif ($smbCode -eq '0') { Line OK "SMB to \\$fqdn\$share connected" }
+    else { Line OK "SMB reaches \\$fqdn\$share (error $smbCode as SYSTEM is expected - SYSTEM has no user Kerberos ticket)" }
 }
 
 # ---------------------------------------------------------------- FSLogix log
@@ -60,17 +71,28 @@ $logDir = 'C:\ProgramData\FSLogix\Logs\Profile'
 $log = Get-ChildItem -Path $logDir -Filter '*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
 if (-not $log) { Line INFO 'No FSLogix profile log yet (nobody has signed in)' }
 else {
-    $errs = @(Select-String -Path $log.FullName -Pattern 'ERROR' -SimpleMatch | Select-Object -Last 6)
-    if (-not $errs.Count) { Line OK "No errors in $($log.Name)" }
+    # Only the most recent sign-in attempt matters - earlier errors may predate a fix.
+    $all = @(Get-Content -LiteralPath $log.FullName)
+    $startIx = 0
+    foreach ($marker in 'Begin Session', 'LoadProfile') {
+        $hits = @(for ($i = 0; $i -lt $all.Count; $i++) { if ($all[$i] -match $marker) { $i } })
+        if ($hits.Count) { $startIx = $hits[-1]; break }
+    }
+    $attemptTime = if ($all.Count -and $all[$startIx] -match '^\[(\d{2}:\d{2}:\d{2})') { $Matches[1] } else { '?' }
+    $errs = @($all[$startIx..($all.Count - 1)] | Where-Object { $_ -match '\[ERROR' } | Select-Object -Last 6)
+    $older = @($all[0..([math]::Max(0, $startIx - 1))] | Where-Object { $_ -match '\[ERROR' }).Count
+    Line INFO ("Most recent sign-in attempt in {0}: {1} (log updated {2:HH:mm:ss})" -f $log.Name, $attemptTime, $log.LastWriteTime)
+    if ($older -and $startIx -gt 0) { Line INFO "$older older error(s) earlier in the log ignored - they predate the latest attempt" }
+    if (-not $errs.Count) { Line OK 'No errors in the most recent sign-in attempt' }
     else {
-        Line INFO "Last errors in $($log.Name):"
+        Line INFO 'Errors in the most recent attempt:'
         $codes = @{}
         foreach ($e in $errs) {
-            $t = $e.Line.Trim(); if ($t.Length -gt 170) { $t = $t.Substring(0, 170) + '...' }
+            $t = "$e".Trim(); if ($t.Length -gt 170) { $t = $t.Substring(0, 170) + '...' }
             Write-Output "  $t"
             # FSLogix writes codes as 8-digit hex, e.g. [ERROR:0000052E] = 1326.
-            foreach ($m in [regex]::Matches($e.Line, 'ERROR:([0-9A-Fa-f]{8})')) { $codes[[string][Convert]::ToInt32($m.Groups[1].Value, 16)] = $true }
-            foreach ($m in [regex]::Matches($e.Line, '\((\d{1,4})\)')) { $codes[$m.Groups[1].Value] = $true }
+            foreach ($m in [regex]::Matches("$e", 'ERROR:([0-9A-Fa-f]{8})')) { $codes[[string][Convert]::ToInt32($m.Groups[1].Value, 16)] = $true }
+            foreach ($m in [regex]::Matches("$e", '\((\d{1,4})\)')) { $codes[$m.Groups[1].Value] = $true }
         }
         foreach ($c in $codes.Keys) { if ($hints.ContainsKey($c)) { Line HINT "($c) $($hints[$c])" } }
     }

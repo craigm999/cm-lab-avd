@@ -569,7 +569,10 @@ if ($env:OS -eq 'Windows_NT') {
     $null = New-Item -ItemType Directory -Force -Path $logDir
     $fakeLog = Join-Path $logDir 'Profile-ci-test.log'
     Set-Content -Path $fakeLog -Value @(
-        '[10:00:00.001][tid:00000a1c.00000b2d][INFO]           Starting LoadProfile'
+        '[09:00:00.001][tid:00000a1c.00000b2d][INFO]           ===== Begin Session: Logon'
+        '[09:00:01.002][tid:00000a1c.00000b2d][ERROR:00000035] Failed to open virtual disk (The network path was not found.)'
+        '[10:00:00.001][tid:00000a1c.00000b2d][INFO]           ===== Begin Session: Logon'
+        '[10:00:00.500][tid:00000a1c.00000b2d][INFO]           Starting LoadProfile'
         '[10:00:01.002][tid:00000a1c.00000b2d][ERROR:0000052E] Failed to open virtual disk (The user name or password is incorrect.)'
     )
     try {
@@ -577,6 +580,9 @@ if ($env:OS -eq 'Windows_NT') {
         Microsoft.PowerShell.Utility\Write-Host $hostOut
         Assert-Equal ($hostOut -match '\[HINT\] \(1326\) Bad credentials') $true 'host diag: FSLogix hex code 0000052E decoded to 1326 with hint'
         Assert-Equal ($hostOut -match '\[(OK|FAIL|WARN)\] CloudKerberosTicketRetrievalEnabled') $true 'host diag: registry checks ran'
+        Assert-Equal ($hostOut -match 'Most recent sign-in attempt in Profile-ci-test\.log: 10:00:00') $true 'host diag: latest attempt identified'
+        Assert-Equal ($hostOut -match '\(53\)') $false 'host diag: error from an earlier attempt not reported'
+        Assert-Equal ($hostOut -match '1 older error\(s\) earlier in the log ignored') $true 'host diag: older errors counted, not shown'
     }
     catch { $failures.Add("Test-FslogixHost threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
     finally {
