@@ -89,7 +89,9 @@ Write-Host ''
 Write-Step 'Listing session hosts'
 $list = Test-Az vm list --resource-group $ResourceGroup --show-details --query '[].{name:name, power:powerState}' -o json --only-show-errors
 if (-not $list.Ok) { throw "Could not list VMs in $ResourceGroup (signed in? right subscription?)." }
-$vms = @($list.Output | ConvertFrom-Json)
+# Assign first, then enumerate: Windows PowerShell 5.1 emits a JSON array as ONE pipeline object.
+$parsed = $list.Output | ConvertFrom-Json
+$vms = @(foreach ($v in $parsed) { $v })
 if ($VmName) { $vms = @($vms | Where-Object { $VmName -contains $_.name }) }
 if (-not $vms.Count) { throw 'No matching VMs found.' }
 

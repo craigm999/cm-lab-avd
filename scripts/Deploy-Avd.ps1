@@ -152,7 +152,10 @@ $existingNumbers = @()
 $vmList = Test-Az vm list --resource-group $hostsRg --query '[].name' -o json --only-show-errors
 if ($vmList.Ok -and $vmList.Output) {
     $pattern = '^' + [regex]::Escape($prefix) + '-(\d+)$'
-    $existingNumbers = @($vmList.Output | ConvertFrom-Json | ForEach-Object { if ($_ -match $pattern) { [int]$Matches[1] } } | Sort-Object)
+    # Assign first, then loop: Windows PowerShell 5.1 sends a JSON array down the pipeline as ONE object.
+    $vmNames = $vmList.Output | ConvertFrom-Json
+    $existingNumbers = @(foreach ($n in $vmNames) { if ("$n" -match $pattern) { [int]$Matches[1] } }) | Sort-Object
+    $existingNumbers = @($existingNumbers)
 }
 $highest = if ($existingNumbers.Count) { $existingNumbers[-1] } else { 0 }
 
