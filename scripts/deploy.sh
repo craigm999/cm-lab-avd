@@ -3,40 +3,52 @@
 #
 # Usage:
 #   export AVD_LOCAL_ADMIN_PASSWORD='<strong password>'
-#   export AVD_USERS_GROUP_ID='<entra group object id>'
-#   export AVD_ADMINS_GROUP_ID='<entra group object id>'   # optional
-#   ./scripts/deploy.sh [what-if]
+#   ./scripts/deploy.sh <param-file> [what-if] [extra az args...]
+#
+# Examples:
+#   ./scripts/deploy.sh infra/params/prod.bicepparam what-if
+#   ./scripts/deploy.sh infra/params/prod.bicepparam
+#   ./scripts/deploy.sh infra/params/prod.bicepparam create -p sessionHostStartIndex=20 sessionHostCountOverride=80
+#
+# The target subscription is read from the "// subscriptionId: <id>" header that
+# scripts/New-AvdParameterFile.ps1 writes, or from $AVD_SUBSCRIPTION_ID.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOCATION="${LOCATION:-uksouth}"
-DEPLOYMENT_NAME="avd-$(date +%Y%m%d%H%M%S)"
+PARAM_FILE="${1:-$REPO_ROOT/infra/main.bicepparam}"
+MODE="${2:-create}"
+shift $(( $# > 2 ? 2 : $# ))
+EXTRA_ARGS=("$@")
 
+[[ -f "$PARAM_FILE" ]] || { echo "Parameter file not found: $PARAM_FILE" >&2; exit 1; }
 : "${AVD_LOCAL_ADMIN_PASSWORD:?Set AVD_LOCAL_ADMIN_PASSWORD}"
-: "${AVD_USERS_GROUP_ID:?Set AVD_USERS_GROUP_ID}"
 
-# Look up the Azure Virtual Desktop service principal (used by autoscale + Start VM on Connect).
-if [[ -z "${AVD_SP_OBJECT_ID:-}" ]]; then
-  AVD_SP_OBJECT_ID="$(az ad sp show --id 9cdead84-a844-4324-93f2-b2e6bb768d07 --query id -o tsv 2>/dev/null || true)"
-  export AVD_SP_OBJECT_ID
-  [[ -z "$AVD_SP_OBJECT_ID" ]] && echo "WARNING: AVD service principal not found - autoscale/Start VM on Connect role not assigned."
+SUBSCRIPTION_ID="${AVD_SUBSCRIPTION_ID:-$(sed -nE 's#^// *subscriptionId: *([0-9a-fA-F-]{36}).*#\1#p' "$PARAM_FILE" | head -1)}"
+LOCATION="$(sed -nE "s#^param location = '([^']+)'.*#\1#p" "$PARAM_FILE" | head -1)"
+LOCATION="${LOCATION:-uksouth}"
+
+if [[ -n "$SUBSCRIPTION_ID" ]]; then
+  az account set --subscription "$SUBSCRIPTION_ID"
 fi
+echo "Subscription: $(az account show --query '[name, id]' -o tsv | paste -sd ' ')"
+echo "Region:       $LOCATION"
+echo "Parameters:   $PARAM_FILE"
 
-# Resource providers
 for rp in Microsoft.DesktopVirtualization Microsoft.Compute Microsoft.Network Microsoft.Storage Microsoft.OperationalInsights Microsoft.Insights; do
   az provider register --namespace "$rp" --output none
 done
 
-if [[ "${1:-}" == "what-if" ]]; then
-  az deployment sub what-if \
-    --name "$DEPLOYMENT_NAME" \
-    --location "$LOCATION" \
-    --template-file "$REPO_ROOT/infra/main.bicep" \
-    --parameters "$REPO_ROOT/infra/main.bicepparam"
-else
-  az deployment sub create \
-    --name "$DEPLOYMENT_NAME" \
-    --location "$LOCATION" \
-    --template-file "$REPO_ROOT/infra/main.bicep" \
-    --parameters "$REPO_ROOT/infra/main.bicepparam"
-fi
+DEPLOYMENT_NAME="avd-$(date +%Y%m%d%H%M%S)"
+case "$MODE" in
+  what-if)
+    az deployment sub what-if --name "$DEPLOYMENT_NAME" --location "$LOCATION" \
+      --template-file "$REPO_ROOT/infra/main.bicep" --parameters "$PARAM_FILE" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+    ;;
+  create)
+    az deployment sub create --name "$DEPLOYMENT_NAME" --location "$LOCATION" \
+      --template-file "$REPO_ROOT/infra/main.bicep" --parameters "$PARAM_FILE" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+    ;;
+  *)
+    echo "Unknown mode '$MODE' (use what-if or create)" >&2; exit 1
+    ;;
+esac

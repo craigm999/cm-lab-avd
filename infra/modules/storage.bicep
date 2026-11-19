@@ -6,6 +6,13 @@ param storageSku string
 param shareQuotaGiB int
 param privateEndpointSubnetId string
 param vnetId string
+@allowed([
+  'new'
+  'existing'
+  'policyManaged'
+])
+param privateDnsZoneMode string = 'new'
+param existingFilePrivateDnsZoneId string = ''
 param avdUsersGroupObjectId string
 param avdAdminsGroupObjectId string = ''
 param logAnalyticsWorkspaceId string
@@ -74,13 +81,13 @@ resource share 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01
 }
 
 // ----------------------------------------------------------------------------- Private endpoint
-resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (privateDnsZoneMode == 'new') {
   name: 'privatelink.file.${environment().suffixes.storage}'
   location: 'global'
   tags: tags
 }
 
-resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (privateDnsZoneMode == 'new') {
   parent: privateDnsZone
   name: 'link-avd-vnet'
   location: 'global'
@@ -114,7 +121,10 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
   }
 }
 
-resource privateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+// With an existing zone (typically in a hub / connectivity subscription) the zone must
+// already be linked to the VNet (or to the hub VNet whose DNS the spoke uses).
+// policyManaged: Azure Policy (DeployIfNotExists) creates the zone group, so none here.
+resource privateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (privateDnsZoneMode != 'policyManaged') {
   parent: privateEndpoint
   name: 'default'
   properties: {
@@ -122,7 +132,7 @@ resource privateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneG
       {
         name: 'file'
         properties: {
-          privateDnsZoneId: privateDnsZone.id
+          privateDnsZoneId: privateDnsZoneMode == 'new' ? privateDnsZone.id : existingFilePrivateDnsZoneId
         }
       }
     ]
