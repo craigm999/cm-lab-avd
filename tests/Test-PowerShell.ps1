@@ -45,7 +45,8 @@ if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
 $excluded = @(
     'PSAvoidUsingWriteHost',                       # interactive script - intentional
     'PSUseShouldProcessForStateChangingFunctions', # helpers, not cmdlets
-    'PSAvoidUsingPlainTextForPassword'
+    'PSAvoidUsingPlainTextForPassword',
+    'PSAvoidUsingConvertToSecureStringWithPlainText' # test fixtures only
 )
 $results = Invoke-ScriptAnalyzer -Path $repo -Recurse -ExcludeRule $excluded
 foreach ($r in $results) {
@@ -70,7 +71,7 @@ function global:Write-Host {
 }
 
 function global:Read-Host {
-    param([Parameter(Position = 0)] [string] $Prompt)
+    param([Parameter(Position = 0)] [string] $Prompt, [switch] $AsSecureString)
     $context = $Prompt
     if ($Prompt -match 'Choice$') {
         # The question is the last non-option line written before the prompt.
@@ -86,6 +87,10 @@ function global:Read-Host {
     }
     foreach ($pair in $global:Answers) {
         if ($context -match $pair[0]) {
+            if ($AsSecureString) {
+                Microsoft.PowerShell.Utility\Write-Host '    > (secure input)' -ForegroundColor Magenta
+                return (ConvertTo-SecureString $pair[1] -AsPlainText -Force)
+            }
             Microsoft.PowerShell.Utility\Write-Host "    > $($pair[1])" -ForegroundColor Magenta
             return $pair[1]
         }
@@ -210,6 +215,57 @@ if ($p) {
     Assert-Equal $p.loadBalancerType.value 'DepthFirst' 'B load balancer'
     Assert-Equal $p.privateDnsZoneMode.value 'policyManaged' 'B DNS mode'
 }
+
+# ------------------------------------------------------------------- 4. Deploy-Avd.ps1 with a fake az
+# A global function named az shadows the real CLI, records each call and returns canned output.
+Write-Host "`n== Deploy-Avd.ps1 (az mocked)" -ForegroundColor Cyan
+$global:AzCalls = [System.Collections.Generic.List[string]]::new()
+$global:PasswordSeenByAz = $null
+function global:az {
+    $line = ($args | ForEach-Object { "$_" }) -join ' '
+    $global:AzCalls.Add($line)
+    $global:LASTEXITCODE = 0
+    if ($line -like 'deployment sub*') { $global:PasswordSeenByAz = $env:AVD_LOCAL_ADMIN_PASSWORD }
+    switch -Wildcard ($line) {
+        'account show --query*' { return '{"name":"Test Sub","id":"00000000-0000-0000-0000-000000000000"}' }
+        'account show*'         { return '{}' }
+        'bicep version*'        { return 'Bicep CLI version 0.49.2' }
+        'provider show*'        { return 'Registered' }
+        'deployment sub what-if*' { return 'Resource changes: 120 to create.' }
+        'deployment sub create*'  { return '{"hostPoolName":{"type":"String","value":"vdpool-avd-prod-uksouth"},"resourceGroupsCreated":{"type":"Array","value":["rg-a","rg-b"]}}' }
+        default { return '' }
+    }
+}
+$deployScript = Join-Path $repo 'scripts/Deploy-Avd.ps1'
+$exampleParams = Join-Path $repo 'infra/main.bicepparam'
+Remove-Item Env:\AVD_LOCAL_ADMIN_PASSWORD -ErrorAction SilentlyContinue
+
+# what-if, password entered at the prompt
+$global:Answers = @( , @('local admin password', 'Pilot-Passw0rd!x') )
+$global:AskLog.Clear()
+try {
+    & $deployScript -ParameterFile $exampleParams -WhatIf
+    $calls = $global:AzCalls -join "`n"
+    Assert-Equal ($calls -match 'account set --subscription 00000000-0000-0000-0000-000000000000') $true 'deploy: subscription taken from param file header'
+    Assert-Equal ($calls -match 'deployment sub what-if --name avd-\d+ --location uksouth --template-file \S+main\.bicep --parameters \S+main\.bicepparam') $true 'deploy: what-if command'
+    Assert-Equal ($calls -match 'deployment sub create') $false 'deploy: -WhatIf does not create'
+    Assert-Equal $global:PasswordSeenByAz 'Pilot-Passw0rd!x' 'deploy: prompted password passed to az'
+    Assert-Equal ([bool]$env:AVD_LOCAL_ADMIN_PASSWORD) $false 'deploy: password cleared afterwards'
+}
+catch { $failures.Add("Deploy-Avd -WhatIf threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
+# create with -Force, password from environment
+$global:AzCalls.Clear()
+$env:AVD_LOCAL_ADMIN_PASSWORD = 'From-Env-Passw0rd!'
+try {
+    & $deployScript -ParameterFile $exampleParams -Force -DeploymentName 'avd-ci'
+    $calls = $global:AzCalls -join "`n"
+    Assert-Equal ($calls -match 'deployment sub create --name avd-ci --location uksouth') $true 'deploy: create command'
+    Assert-Equal ($calls -match 'deployment sub what-if') $false 'deploy: create does not run what-if'
+    Assert-Equal $env:AVD_LOCAL_ADMIN_PASSWORD 'From-Env-Passw0rd!' 'deploy: existing env password left in place'
+}
+catch { $failures.Add("Deploy-Avd create threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+Remove-Item Function:\az -ErrorAction SilentlyContinue
 
 Remove-Item (Join-Path $paramsDir 'ci*') -ErrorAction SilentlyContinue
 

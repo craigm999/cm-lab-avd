@@ -699,8 +699,9 @@ $lines = @(
     '//'
     '// Deploy:'
     "//   export AVD_LOCAL_ADMIN_PASSWORD='<strong password>'"
-    "//   ./scripts/deploy.sh infra/params/$environmentName.bicepparam what-if"
-    "//   ./scripts/deploy.sh infra/params/$environmentName.bicepparam"
+    "//   Windows:     .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\$environmentName.bicepparam -WhatIf"
+    "//                .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\$environmentName.bicepparam"
+    "//   macOS/Linux: ./scripts/deploy.sh infra/params/$environmentName.bicepparam what-if"
     "using '../main.bicep'"
     ''
     '// ---------------------------------------------------------------- General'
@@ -793,13 +794,13 @@ Write-Ok "Parameter file: $paramPath"
 Write-Ok "Answers:        $answersPath"
 Write-Host ''
 Write-Host '  Next steps:' -ForegroundColor White
-Write-Host "    1. export AVD_LOCAL_ADMIN_PASSWORD='<strong password>'   (PowerShell: `$env:AVD_LOCAL_ADMIN_PASSWORD = '...')"
-Write-Host "    2. ./scripts/deploy.sh infra/params/$environmentName.bicepparam what-if"
-Write-Host "    3. ./scripts/deploy.sh infra/params/$environmentName.bicepparam"
+Write-Host "    1. .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\$environmentName.bicepparam -WhatIf"
+Write-Host "    2. .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\$environmentName.bicepparam"
+Write-Host '       (prompts for the session host local admin password; macOS/Linux: scripts/deploy.sh)'
 if ($pilot -lt $hostsNeeded) {
     Write-Host "    4. Later, to add the remaining $($hostsNeeded - $pilot) hosts, edit $environmentName.bicepparam:"
     Write-Host "         param sessionHostStartIndex = $pilot"
     Write-Host "         param sessionHostCountOverride = $($hostsNeeded - $pilot)"
-    Write-Host '       then run deploy.sh again (what-if first).'
+    Write-Host '       then run Deploy-Avd.ps1 again (-WhatIf first).'
     if ($deployScalingPlan) { Write-Host "    Tip: tag pilot hosts 'ExcludeFromScaling' so autoscale doesn't power them off while you test." }
 }

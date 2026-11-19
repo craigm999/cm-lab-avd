@@ -25,9 +25,10 @@ Bicep deployment for an **Azure Virtual Desktop** environment with:
 - **PowerShell** (`tests/Test-PowerShell.ps1`):
   - parses every script and runs PSScriptAnalyzer
   - runs the questionnaire end to end with scripted answers for two scenarios
+  - runs `Deploy-Avd.ps1` against a stubbed Azure CLI to check the commands it issues and its password handling
   - compiles the generated parameter files and checks their values
 
-The workflow can't run a real deployment: there are no Azure credentials in CI. Run `./scripts/deploy.sh <params> what-if` against your subscription for that.
+The workflow can't run a real deployment: there are no Azure credentials in CI. Run `Deploy-Avd.ps1 -WhatIf` (or `deploy.sh ... what-if`) against your subscription for that.
 
 ## Start here: the questionnaire
 
@@ -84,7 +85,8 @@ infra/
     Configure-SessionHost.ps1  # run command: FSLogix + Kerberos registry settings
 scripts/
   New-AvdParameterFile.ps1   # interactive questionnaire -> infra/params/<env>.bicepparam
-  deploy.sh                  # wrapper around az deployment sub create / what-if
+  Deploy-Avd.ps1             # deploy / -WhatIf from Windows (PowerShell)
+  deploy.sh                  # same, for macOS / Linux
   Enable-EntraSSO.ps1        # one-off tenant config for Entra SSO
 ```
 
@@ -121,31 +123,50 @@ If your users are light task workers, `Standard_D4s_v5` halves the compute cost.
 
 ## Deploy
 
-```bash
+### From Windows (PowerShell)
+
+You need the Azure CLI (`winget install -e --id Microsoft.AzureCLI`; open a new terminal afterwards). The scripts work in Windows PowerShell 5.1 and PowerShell 7. If script execution is blocked, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or `Unblock-File` the downloaded scripts.
+
+```powershell
 az login
 ```
 
-```bash
-pwsh ./scripts/New-AvdParameterFile.ps1
+```powershell
+.\scripts\New-AvdParameterFile.ps1
 ```
+
+Preview the changes:
+
+```powershell
+.\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
+```
+
+Deploy:
+
+```powershell
+.\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam
+```
+
+`Deploy-Avd.ps1`:
+- reads the subscription from the `// subscriptionId:` line in the parameter file (`-SubscriptionId` overrides it)
+- prompts for the session host local admin password with hidden input, and removes it from the session when it finishes
+- registers any missing resource providers
+- asks you to type `yes` before a real deployment (`-Force` skips this)
+- prints the deployment outputs at the end
+
+### From macOS / Linux (bash)
 
 ```bash
 export AVD_LOCAL_ADMIN_PASSWORD='<strong password>'
 ```
 
-Preview the changes:
-
 ```bash
 ./scripts/deploy.sh infra/params/prod.bicepparam what-if
 ```
 
-Deploy:
-
 ```bash
 ./scripts/deploy.sh infra/params/prod.bicepparam
 ```
-
-`deploy.sh` reads the target subscription from the `// subscriptionId:` line at the top of the parameter file. Set `AVD_SUBSCRIPTION_ID` to override it.
 
 The questionnaire looks up the object ID of the **Azure Virtual Desktop** service principal (appId `9cdead84-a844-4324-93f2-b2e6bb768d07`). The deployment grants that principal *Desktop Virtualization Power On Off Contributor*, which autoscale and Start VM on Connect need.
 
@@ -167,11 +188,11 @@ Session hosts deploy 20 at a time. A full 100-host deployment takes roughly 45â€
    param sessionHostCountOverride = 99
    param sessionHostStartIndex = 1
    ```
-   ```bash
-   ./scripts/deploy.sh infra/params/prod.bicepparam what-if
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
    ```
-   ```bash
-   ./scripts/deploy.sh infra/params/prod.bicepparam
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam
    ```
    This creates `avdsh-002` to `avdsh-100` and leaves `avdsh-001` untouched. Zone placement continues round-robin, so the final spread is still 34/33/33. The shared resources are redeployed with the same values, so nothing changes on them. Raise the vCPU quota to 800 before this run.
 
