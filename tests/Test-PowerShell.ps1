@@ -81,7 +81,7 @@ function global:Read-Host {
     $global:AskLog.Add($context)
     if ($global:AskLog.Count -gt 200) { throw 'Too many prompts - questionnaire is looping (a scripted answer was probably rejected).' }
     $last3 = $global:AskLog | Select-Object -Last 3
-    if ($global:AskLog.Count -ge 3 -and ($last3 | Select-Object -Unique).Count -eq 1) {
+    if ($global:AskLog.Count -ge 3 -and @($last3 | Select-Object -Unique).Count -eq 1) {
         throw "Same prompt asked 3 times (answer rejected?): $context"
     }
     foreach ($pair in $global:Answers) {
@@ -135,7 +135,7 @@ $p = Invoke-Scenario 'existing landing zone' 'ciexst' @(
     , @('tenant ID', $tenant)
     , @('Workload subscription', $sub)
     , @('Session host virtual network', 'existing')
-    , @('Existing VNet', $vnet)
+    , @('^\s*Existing VNet', $vnet)
     , @('^\s*Session host subnet$', "$vnet/subnets/snet-avd")
     , @('Private endpoint subnet', "$vnet/subnets/snet-pe")
     , @('reach the internet', 'Hub Azure Firewall')

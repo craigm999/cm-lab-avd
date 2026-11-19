@@ -244,7 +244,7 @@ function ConvertTo-BicepString([string] $s) {
 }
 
 function ConvertTo-BicepArray([string[]] $Items, [int] $Indent = 0) {
-    $Items = @($Items | Where-Object { $_ -ne '' })
+    $Items = @($Items | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     if ($Items.Count -eq 0) { return '[]' }
     $pad = '  ' * $Indent
     $lines = @('[')
@@ -365,11 +365,14 @@ else {
     $locations = Invoke-AzJson account list-locations --query "[?metadata.regionType=='Physical'].{name:name, display:displayName}"
     $location = Read-Answer -Key 'location' -Prompt 'Azure region (e.g. uksouth, westeurope, eastus2)' -Default 'uksouth' -Validate {
         param($x)
+        if ($x -notmatch '^[a-z][a-z0-9]{2,30}$') { return "Enter the region's short name, e.g. uksouth." }
         if ($locations -and -not ($locations | Where-Object { $_.name -eq $x })) { return "Unknown region '$x'." }
     }
 }
 if ($networkMode -eq 'existing' -and -not $location) {
-    $location = Read-Answer -Key 'location' -Prompt 'Azure region of the existing VNet' -Default 'uksouth'
+    $location = Read-Answer -Key 'location' -Prompt 'Azure region of the existing VNet' -Default 'uksouth' -Validate {
+        param($x) if ($x -notmatch '^[a-z][a-z0-9]{2,30}$') { "Enter the region's short name, e.g. uksouth." }
+    }
 }
 $script:Answers['location'] = $location
 
