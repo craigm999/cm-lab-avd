@@ -227,6 +227,7 @@ $global:PasswordSeenByAz = $null
 $global:DeployParamText = $null
 $global:MockVmNames = '[]'
 $global:MockVmPower = '[]'
+$global:AzResponses = $null
 $global:MockGraph = $false
 $global:MockDnsLinks = '[]'
 $global:MockZoneList = '[]'
@@ -239,6 +240,15 @@ function global:az {
         $global:PasswordSeenByAz = $env:AVD_LOCAL_ADMIN_PASSWORD
         $i = [array]::IndexOf([string[]]$args, '--parameters')
         if ($i -ge 0) { $global:DeployParamText = Get-Content -Raw -LiteralPath $args[$i + 1] }
+    }
+    if ($global:AzResponses) {
+        foreach ($k in $global:AzResponses.Keys) {
+            if ($line -like $k) {
+                $v = $global:AzResponses[$k]
+                if ($v -is [int]) { $global:LASTEXITCODE = $v; return '' }
+                return $v
+            }
+        }
     }
     switch -Wildcard ($line) {
         'vm list --resource-group * --show-details*' { return $global:MockVmPower }
@@ -377,6 +387,63 @@ try {
     Assert-Equal ($calls -match 'run-command create --resource-group rg-hosts --vm-name avdsh-002') $true 'update -IncludeStopped: configures it'
 }
 catch { $failures.Add("Update-SessionHostConfig -IncludeStopped threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
+# Test-AvdUserAccess: healthy member, then an unassigned guest
+Write-Host "`n== Test-AvdUserAccess.ps1 (az mocked)" -ForegroundColor Cyan
+$accessScript = Join-Path $repo 'scripts/Test-AvdUserAccess.ps1'
+$svc = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-svc/providers/Microsoft.DesktopVirtualization'
+function New-AccessMock([hashtable] $Overrides) {
+    $m = [ordered]@{}
+    foreach ($k in $Overrides.Keys) { $m[$k] = $Overrides[$k] }
+    $defaults = [ordered]@{
+        'resource list --resource-type Microsoft.DesktopVirtualization/hostPools --name*' = '[{"id":"' + $svc + '/hostPools/vdpool-x","rg":"rg-svc"}]'
+        'ad user show*'                 = '{"id":"u-1","upn":"alice@contoso.com","type":"Member","enabled":true,"mail":"alice@contoso.com"}'
+        'ad user get-member-groups*'    = '["g-users"]'
+        'resource list --resource-group rg-svc --resource-type Microsoft.DesktopVirtualization/applicationGroups*' = '["' + $svc + '/applicationGroups/ag1"]'
+        'role assignment list --scope*' = '[{"pid":"g-users","type":"Group","name":"AVD Users"}]'
+        'ad group member check*'        = 'true'
+        'resource list --resource-group rg-svc --resource-type Microsoft.DesktopVirtualization/workspaces*' = '["' + $svc + '/workspaces/ws1"]'
+        'resource show --ids */workspaces/*'  = '["' + $svc + '/applicationGroups/ag1"]'
+        'role assignment list --resource-group*' = '[{"pid":"g-users","role":"Virtual Machine User Login","name":"AVD Users"}]'
+        'rest --method get --url https://management.azure.com*' = '[{"name":"vdpool-x/avdsh-001","status":"Available","allow":true,"sessions":0}]'
+        'resource show --ids */hostPools/*' = 'targetisaadjoined:i:1;enablerdsaadauth:i:1;'
+        'rest --method get --url https://graph.microsoft.com*' = 'true'
+    }
+    foreach ($k in $defaults.Keys) { if (-not $m.Contains($k)) { $m[$k] = $defaults[$k] } }
+    return $m
+}
+
+$global:AzResponses = New-AccessMock @{}
+$global:HostBuffer.Clear()
+try {
+    & $accessScript -User 'alice@contoso.com' -HostPoolName 'vdpool-x' -HostsResourceGroup 'rg-hosts'
+    $out = ($global:HostBuffer) -join "`n"
+    Assert-Equal ($out -match '\[PASS\] Assigned .Desktop Virtualization User. via group AVD Users') $true 'access: member assignment found via group'
+    Assert-Equal ($out -match '\[PASS\] Application group is registered') $true 'access: workspace registration'
+    Assert-Equal ($out -match '\[PASS\] Has Virtual Machine User Login') $true 'access: sign-in role'
+    Assert-Equal ($out -match '\[PASS\] avdsh-001 is Available') $true 'access: host available'
+    Assert-Equal ($out -match '\[FAIL\]') $false 'access: no failures for a healthy member'
+}
+catch { $failures.Add("Test-AvdUserAccess (member) threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
+$global:AzResponses = New-AccessMock ([ordered]@{
+    'ad user show*' = 1
+    'ad user list --filter*' = '[{"id":"u-2","upn":"bob_fabrikam.com#EXT#@contoso.onmicrosoft.com","type":"Guest","enabled":true,"mail":"bob@fabrikam.com"}]'
+    'ad user get-member-groups*' = '[]'
+    'role assignment list --scope*' = '[{"pid":"g-users","type":"Group","name":"AVD Users"}]'
+    'rest --method get --url https://graph.microsoft.com*' = 'false'
+})
+$global:HostBuffer.Clear()
+try {
+    & $accessScript -User 'bob@fabrikam.com' -HostPoolName 'vdpool-x' -HostsResourceGroup 'rg-hosts'
+    $out = ($global:HostBuffer) -join "`n"
+    Assert-Equal ($out -match 'bob_fabrikam\.com#EXT#.*\(Guest\)') $true 'access: guest found by email'
+    Assert-Equal ($out -match '\[FAIL\] User has no Desktop Virtualization User assignment') $true 'access: missing assignment reported'
+    Assert-Equal ($out -match '\[FAIL\] Entra RDP protocol is NOT enabled') $true 'access: tenant SSO setting is a failure for guests'
+    Assert-Equal ($out -match 'one-time passcode guests are NOT supported') $true 'access: guest requirements listed'
+}
+catch { $failures.Add("Test-AvdUserAccess (guest) threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+$global:AzResponses = $null
 
 Remove-Item Function:\az -ErrorAction SilentlyContinue
 

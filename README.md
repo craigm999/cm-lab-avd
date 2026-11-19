@@ -87,6 +87,7 @@ scripts/
   New-AvdParameterFile.ps1   # interactive questionnaire -> infra/params/<env>.bicepparam
   Deploy-Avd.ps1             # deploy / -WhatIf / -AddHosts / -InfraOnly (Windows PowerShell)
   Update-SessionHostConfig.ps1  # re-apply FSLogix/Kerberos settings to existing hosts
+  Test-AvdUserAccess.ps1     # read-only: why can't this user see / open the desktop?
   deploy.sh                  # same, for macOS / Linux
   Enable-EntraSSO.ps1        # one-off tenant config for Entra SSO
 ```
@@ -284,7 +285,7 @@ These steps can't be fully expressed in ARM/Bicep:
 2. **Exclude that storage app from Conditional Access policies that require MFA.** Otherwise, Kerberos ticket retrieval for the FSLogix share fails.
 3. **Set NTFS permissions on the `profiles` share** for the FSLogix creator/owner pattern. Use an admin who holds *Storage File Data SMB Share Elevated Contributor* (the admins group is granted this). See Microsoft's "Configure FSLogix profile container with Azure Files and Microsoft Entra ID" guidance.
    - Identity support: Entra Kerberos for Azure Files is generally available for **hybrid** identities (users synced from AD). Support for **cloud-only** users is newer. Check its current status for your tenant before relying on it for FSLogix.
-4. **Optional: suppress the SSO consent prompt.** Create a group (dynamic or assigned) containing the session host devices, then run:
+4. **Enable Entra SSO for the tenant.** This step is **required if any users are guests** (external identities). Members can skip it, but they then get an extra sign-in prompt. Run it as an admin who can manage service principals. Adding a device group of the session hosts also removes the consent prompt:
    ```powershell
    ./scripts/Enable-EntraSSO.ps1 -TargetDeviceGroupId <device group id>
    ```
@@ -292,7 +293,39 @@ These steps can't be fully expressed in ARM/Bicep:
 
 ## Connecting
 
-Users subscribe in Windows App or the Remote Desktop client, or use the web client at `https://windows.cloud.microsoft`. Because the hosts are Entra-joined, the client device must be Entra joined or registered, or SSO (`enablerdsaadauth`) must be enabled, which is the default here.
+Users subscribe in Windows App or use the web client at `https://windows.cloud.microsoft`. Because the hosts are Entra-joined, the client device must be Entra joined or registered, or SSO (`enablerdsaadauth`) must be enabled, which is the default here.
+
+### A user can't see the desktop in Windows App
+
+Run the read-only access check for that user:
+
+```powershell
+.\scripts\Test-AvdUserAccess.ps1 -ParameterFile .\infra\params\prod.bicepparam -User alice@contoso.com
+```
+
+It checks each requirement in order and prints PASS / WARN / FAIL with the fix:
+1. The account exists and is enabled, and whether it's a member or a guest. Guests can be given by email address.
+2. **Desktop Virtualization User** on the app group (directly or through a group). This is what makes the desktop appear, and the script flags nested groups.
+3. The app group is registered in the workspace.
+4. **Virtual Machine User Login** on the hosts. Without it the desktop appears but sign-in is refused.
+5. The session hosts are available and not draining.
+6. SSO on the host pool and the tenant-wide Entra RDP setting.
+7. Guest-specific requirements.
+
+Then check the client side:
+- **Try the web client first:** <https://windows.cloud.microsoft> in a private browser window. If the desktop appears there but not in Windows App, the app is signed in with a different account. On Windows it uses the account signed in to Windows, so add the correct work account, or sign out and back in.
+- **After changing groups or assignments:** sign out of Windows App and back in. Membership changes take a few minutes, longer for dynamic groups.
+- **Conditional Access:** Entra ID → Sign-in logs for the user, filtered to *Azure Virtual Desktop* and *Windows Cloud Login*.
+
+### Guest (external) users
+
+Microsoft supports guests on this design (*AVD authentication → External identity*), with these requirements:
+- **Hosts:** Entra-joined (yes) and running Windows 11 24H2 or later with the 2025-09 cumulative update or later. The marketplace image with `version: 'latest'` meets this.
+- **SSO:** set on the host pool (`enableSingleSignOn = true`, the default) **and** at tenant level (`Enable-EntraSSO.ps1`, post-deployment step 4).
+- **Client:** Windows App on Windows, macOS, iOS or Android, or the web client.
+- **Account type:** the guest signs in with an Entra work or school account or a Microsoft account. **Email one-time passcode guests are not supported.**
+- **Licensing:** the guest needs an eligible licence, e.g. Microsoft 365 E3, assigned to their guest object **in this tenant**.
+- **Profiles:** FSLogix on Azure Files authenticates with Entra Kerberos, and it isn't confirmed that guest accounts can get that ticket. With `PreventLoginWithFailure = 1`, a failed profile mount blocks sign-in. Test a guest on the pilot host before rolling out.
 
 ## Things you might want to change
 
