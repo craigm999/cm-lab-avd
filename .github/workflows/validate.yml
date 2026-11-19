@@ -1,0 +1,35 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bicep:
+    name: Bicep compile, lint and design checks
+    runs-on: ubuntu-latest
+    env:
+      AVD_LOCAL_ADMIN_PASSWORD: ci-placeholder-not-a-real-password-1!
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bicep
+        run: az bicep install && az bicep version
+      - name: Template tests
+        run: bash tests/test-template.sh
+
+  powershell:
+    name: PowerShell parse, analyzer and questionnaire E2E
+    runs-on: ubuntu-latest
+    env:
+      AVD_LOCAL_ADMIN_PASSWORD: ci-placeholder-not-a-real-password-1!
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bicep
+        run: az bicep install && az bicep version
+      - name: PowerShell tests
+        shell: pwsh
+        run: ./tests/Test-PowerShell.ps1
