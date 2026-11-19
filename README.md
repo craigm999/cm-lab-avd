@@ -320,9 +320,27 @@ The report shows the registry settings, required services, DNS for the storage a
 |---|---|---|
 | **1326** (`0000052E`) | No Kerberos ticket, so it fell back to NTLM | `Set-FslogixStorageAuth.ps1` (privatelink names, consent), then restart the host |
 | **1327** (`0000052F`) | Account restrictions | An MFA Conditional Access policy covers the storage app. Exclude it. |
-| **5** (`00000005`) | Access denied | Share role / NTFS permissions. For cloud-only users, the groups tag (`Set-FslogixStorageAuth.ps1`). Share-permission changes take up to ~30 min. |
+| **5** (`00000005`) | Access denied | In order: **storage firewall** doesn't allow the host subnet (service endpoint mode, or a leftover rule); **share-level permission** missing or not applied yet (takes up to ~30 min); NTFS permissions changed from the defaults. The Azure-side section of `Get-FslogixHostDiagnostics.ps1` checks the first two. |
 | **53 / 67** | Network path or name not found | DNS (the account must resolve to the private endpoint IP) or TCP 445 blocked |
 | **1311** | No logon servers | Kerberos ticket retrieval isn't active: check the registry setting and restart |
+
+**Testing as the affected user.** FSLogix blocks sign-in when the profile fails (`PreventLoginWithFailure`), so the user can't log on to see the real error. Exclude them from FSLogix on one host temporarily (Entra users use the `AzureAD\` prefix):
+
+```powershell
+az vm run-command invoke -g <hosts RG> -n avdsh-001 --command-id RunPowerShellScript --scripts 'net localgroup "FSLogix Profile Exclude List" "AzureAD\alice@contoso.com" /add'
+```
+
+They can then sign in with a local profile. In a command prompt, run:
+
+```
+klist get cifs/<storage account>.file.core.windows.net
+```
+
+```
+dir \\<storage account>.file.core.windows.net\profiles
+```
+
+The first should return a ticket and the second should list the share. Any error here is the real one. Afterwards, sign them out and remove the exclusion with the same command, using `/delete` instead of `/add`.
 
 **DNS:** `<name>.file.core.windows.net` must resolve, via a `privatelink` CNAME, to the private endpoint's IP **from the session host**.
 - With `privateDnsZoneMode = 'new'`, the template links the zone to the VNet.

@@ -48,7 +48,7 @@ if ($unc -match '^\\\\([^\\]+)\\') {
 
 # ---------------------------------------------------------------- FSLogix log
 $hints = @{
-    '5'    = 'Access denied: share-level role, NTFS permissions, or cloud-only groups tag (Set-FslogixStorageAuth.ps1)'
+    '5'    = 'Access denied: storage firewall not allowing this subnet, share-level permission (up to 30 min to apply), or NTFS - see the Azure-side checks above'
     '53'   = 'Network path not found: DNS or port 445'
     '67'   = 'Network name not found: share name / DNS'
     '86'   = 'Invalid password: no Kerberos ticket - admin consent / privatelink names (Set-FslogixStorageAuth.ps1), restart'

@@ -371,6 +371,38 @@ Assert-Equal ($threw -match 'Private DNS zone conflict') $true 'dns pre-flight (
 Remove-Item $dnsParams -ErrorAction SilentlyContinue
 $global:MockGraph = $false; $global:MockDnsLinks = '[]'; $global:MockZoneList = '[]'; $global:MockZoneLinks = '[]'
 
+# Diagnostics, Azure side: storage firewall missing the host subnet -> the Access Denied (error 5) cause
+Write-Host "`n== Get-FslogixHostDiagnostics.ps1 storage checks (az mocked)" -ForegroundColor Cyan
+$hostSubnetId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-net/providers/Microsoft.Network/virtualNetworks/vnet-spoke/subnets/snet-avd'
+$saJson = '{"id":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-st/providers/Microsoft.Storage/storageAccounts/sa1","location":"uksouth","public":"Enabled","default":"Deny","rules":RULES,"pe":1,"dirsvc":"AADKERB","sharePerm":"StorageFileDataSmbShareContributor"}'
+$global:AzResponses = [ordered]@{
+    'storage account show --name*' = $saJson.Replace('RULES', '[]')
+    'vm show --resource-group*'    = '{"location":"uksouth","nic":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-hosts/providers/Microsoft.Network/networkInterfaces/nic-avdsh-001"}'
+    'network nic show --ids*'      = $hostSubnetId
+    'network vnet subnet show --ids*' = '[{"service":"Microsoft.Storage","state":"Succeeded"}]'
+    'role assignment list --scope*'   = '[{"role":"Storage File Data SMB Share Contributor","name":"AVD Users"}]'
+    'vm run-command invoke*'          = "[stdout]`n[OK] TCP 445 reachable"
+}
+$global:HostBuffer.Clear()
+try {
+    & $diagScript -VmName 'avdsh-001' -ResourceGroup 'rg-hosts' -StorageAccountName 'sa1' -NetworkAccess serviceEndpoint
+    $out = ($global:HostBuffer) -join "`n"
+    Assert-Equal ($out -match '\[FAIL\] Storage firewall does NOT allow the host subnet') $true 'diag storage: missing firewall rule reported'
+    Assert-Equal ($out.Contains("network-rule add --resource-group rg-st --account-name sa1 --subnet $hostSubnetId")) $true 'diag storage: fix command printed'
+    Assert-Equal ($out -match '\[OK\] Host subnet has the Microsoft.Storage service endpoint') $true 'diag storage: subnet service endpoint checked'
+    Assert-Equal ($out -match '\[WARN\] The account still has 1 private endpoint') $true 'diag storage: leftover private endpoint flagged'
+    Assert-Equal ($out -match '\[OK\] Default share-level permission') $true 'diag storage: default share permission checked'
+}
+catch { $failures.Add("Diagnostics storage checks threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+$global:AzResponses['storage account show --name*'] = $saJson.Replace('RULES', '[{"id":"' + $hostSubnetId.ToUpper() + '","state":"Succeeded"}]')
+$global:HostBuffer.Clear()
+try {
+    & $diagScript -VmName 'avdsh-001' -ResourceGroup 'rg-hosts' -StorageAccountName 'sa1' -NetworkAccess serviceEndpoint
+    Assert-Equal ((($global:HostBuffer) -join "`n") -match '\[OK\] Storage firewall allows the host subnet') $true 'diag storage: rule found (case-insensitive ID match)'
+}
+catch { $failures.Add("Diagnostics storage checks (ok) threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+$global:AzResponses = $null
+
 # Service endpoint pre-flight: existing subnet without Microsoft.Storage -> stop and print the command
 Write-Host "`n== Deploy-Avd.ps1 service endpoint pre-flight (az mocked)" -ForegroundColor Cyan
 $seParams = Join-Path $repo 'infra/params/cise.bicepparam'
