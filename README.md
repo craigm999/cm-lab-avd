@@ -10,6 +10,25 @@ Bicep deployment for an **Azure Virtual Desktop** environment with:
 - Private networking: no inbound ports, and a private endpoint for storage
 - Works with **new or existing** resource groups, VNet, Log Analytics workspace and private DNS zone, so it can go into an existing landing zone
 
+## Architecture diagram
+
+`docs/avd-build-map.html` is an interactive diagram. Open it in a browser and toggle new or existing VNet, egress, hub peering, Log Analytics, DNS, FSLogix and autoscale to see what gets created, what is only referenced, and where traffic flows.
+
+## Testing
+
+`.github/workflows/validate.yml` runs on every push:
+
+- **Bicep** (`tests/test-template.sh`):
+  - compiles and lints `main.bicep`
+  - builds every scenario parameter file in `tests/params/` (greenfield, hub-spoke with a shared resource group, minimal)
+  - checks the compiled ARM JSON for the design requirements: Entra join with no Intune `mdmId`, the agent registering with `aadJoin: true`, a pooled host pool, and the host count formula
+- **PowerShell** (`tests/Test-PowerShell.ps1`):
+  - parses every script and runs PSScriptAnalyzer
+  - runs the questionnaire end to end with scripted answers for two scenarios
+  - compiles the generated parameter files and checks their values
+
+The workflow can't run a real deployment: there are no Azure credentials in CI. Run `./scripts/deploy.sh <params> what-if` against your subscription for that.
+
 ## Start here: the questionnaire
 
 Collect the environment details first. You can do this in one of two ways:
