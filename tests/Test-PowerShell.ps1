@@ -457,3 +457,4 @@ if ($failures.Count) {
     exit 1
 }
 Microsoft.PowerShell.Utility\Write-Host 'All PowerShell tests passed.' -ForegroundColor Green
+exit 0   # scripts under test may legitimately leave a non-zero LASTEXITCODE
