@@ -23,7 +23,7 @@ param(
     [string] $StorageAccountName,
     [ValidateSet('privateEndpoint', 'serviceEndpoint')] [string] $NetworkAccess
 )
-$networkAccess = $NetworkAccess
+$accessMode = $NetworkAccess   # separate name: PowerShell variables are case-insensitive
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -49,11 +49,11 @@ if ($ParameterFile) {
         $outs = Get-Content -Raw -LiteralPath $outputsFile | ConvertFrom-Json
         if (-not $ResourceGroup) { $ResourceGroup = $outs.sessionHostResourceGroup.value }
         if (-not $StorageAccountName -and $outs.PSObject.Properties['fslogixStorageAccountName']) { $StorageAccountName = $outs.fslogixStorageAccountName.value }
-        if ($outs.PSObject.Properties['fslogixNetworkAccess'] -and $outs.fslogixNetworkAccess.value) { $networkAccess = $outs.fslogixNetworkAccess.value }
+        if ($outs.PSObject.Properties['fslogixNetworkAccess'] -and $outs.fslogixNetworkAccess.value) { $accessMode = $outs.fslogixNetworkAccess.value }
     }
-    if (-not $networkAccess -and $paramText -match "(?m)^param\s+fslogixNetworkAccess\s*=\s*'([^']+)'") { $networkAccess = $Matches[1] }
+    if (-not $accessMode -and $paramText -match "(?m)^param\s+fslogixNetworkAccess\s*=\s*'([^']+)'") { $accessMode = $Matches[1] }
 }
-if (-not $networkAccess) { $networkAccess = 'privateEndpoint' }
+if (-not $accessMode) { $accessMode = 'privateEndpoint' }
 if (-not $ResourceGroup) { throw 'Session host resource group unknown - pass -ResourceGroup (or -ParameterFile after a Deploy-Avd.ps1 run).' }
 
 function Write-Check([string] $State, [string] $Text) {
@@ -86,7 +86,7 @@ if ($StorageAccountName) {
         if ("$($sa.dirsvc)" -eq 'AADKERB') { Write-Check OK 'Identity source: Microsoft Entra Kerberos' } else { Write-Check FAIL "Identity source is '$($sa.dirsvc)', expected AADKERB" }
         if ($vm -and "$($vm.location)" -ne "$($sa.location)") { Write-Check WARN "Storage account is in $($sa.location) but the host is in $($vm.location)" }
 
-        if ($networkAccess -eq 'serviceEndpoint') {
+        if ($accessMode -eq 'serviceEndpoint') {
             if ("$($sa.public)" -eq 'Enabled') { Write-Check OK 'Public network access: Enabled (firewalled)' }
             else { Write-Check FAIL "Public network access is '$($sa.public)' - service endpoint mode needs it Enabled. Re-run Deploy-Avd.ps1 -InfraOnly with fslogixNetworkAccess = 'serviceEndpoint'." }
             if ("$($sa.default)" -ne 'Deny') { Write-Check WARN "Firewall default action is '$($sa.default)' (expected Deny)" }
@@ -123,7 +123,7 @@ if ($StorageAccountName) {
 }
 
 Write-Host "Running diagnostics on $VmName (takes about a minute)..." -ForegroundColor Cyan
-$r = Test-Az vm run-command invoke --resource-group $ResourceGroup --name $VmName --command-id RunPowerShellScript --scripts "@$hostScript" --parameters "NetworkAccess=$networkAccess" --query 'value[0].message' -o tsv --only-show-errors
+$r = Test-Az vm run-command invoke --resource-group $ResourceGroup --name $VmName --command-id RunPowerShellScript --scripts "@$hostScript" --parameters "NetworkAccess=$accessMode" --query 'value[0].message' -o tsv --only-show-errors
 if (-not $r.Ok) { throw "Run Command failed on $VmName. Is the VM running? (az vm start -g $ResourceGroup -n $VmName)" }
 
 Write-Host ''

@@ -373,6 +373,7 @@ $global:MockGraph = $false; $global:MockDnsLinks = '[]'; $global:MockZoneList = 
 
 # Diagnostics, Azure side: storage firewall missing the host subnet -> the Access Denied (error 5) cause
 Write-Host "`n== Get-FslogixHostDiagnostics.ps1 storage checks (az mocked)" -ForegroundColor Cyan
+$diagScript = Join-Path $repo 'scripts/Get-FslogixHostDiagnostics.ps1'
 $hostSubnetId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-net/providers/Microsoft.Network/virtualNetworks/vnet-spoke/subnets/snet-avd'
 $saJson = '{"id":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-st/providers/Microsoft.Storage/storageAccounts/sa1","location":"uksouth","public":"Enabled","default":"Deny","rules":RULES,"pe":1,"dirsvc":"AADKERB","sharePerm":"StorageFileDataSmbShareContributor"}'
 $global:AzResponses = [ordered]@{
