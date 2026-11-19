@@ -333,6 +333,42 @@ If DNS returns a public IP, the zone isn't being used. Public network access on 
 
 **Guests:** the Azure Files guide supports external users only for FSLogix on AVD. Entra's Kerberos overview says B2B guests can't currently use Entra Kerberos. The two pages conflict, so test a guest before relying on it.
 
+### FSLogix without private endpoints (`fslogixNetworkAccess = 'serviceEndpoint'`)
+
+Use this if you can't add private DNS records, for example when the DNS zone is owned by another team. There's no private endpoint and no `privatelink` zone:
+- The storage account keeps its normal public name and IP, resolved by ordinary public DNS.
+- The session host subnet gets a **Microsoft.Storage service endpoint**. Traffic to the account goes over the Microsoft backbone, not the internet.
+- The storage firewall denies everything except that subnet.
+- Authentication is unchanged: Entra Kerberos, with shared keys disabled.
+
+| | Private endpoint (default) | Service endpoint |
+|---|---|---|
+| DNS changes | `privatelink.file` zone must resolve from the hosts | None |
+| Storage public endpoint | Disabled | Enabled, firewalled to the host subnet only |
+| Subnet change | — | Microsoft.Storage service endpoint on the host subnet |
+| Reachable from on-premises / other VNets | Yes, via the private IP | No, only from the host subnet. FSLogix doesn't need more. |
+
+**Switching an existing deployment:**
+1. **Existing VNet only:** add the service endpoint to the session host subnet. `Deploy-Avd.ps1` checks this and prints the exact command, which keeps any endpoints the subnet already has:
+   ```powershell
+   az network vnet subnet update --ids <session host subnet ID> --service-endpoints Microsoft.Storage
+   ```
+   With a new VNet, the template adds it for you.
+2. **Set the parameter and redeploy the shared resources:**
+   ```bicep
+   param fslogixNetworkAccess = 'serviceEndpoint'
+   ```
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -InfraOnly
+   ```
+3. **Delete the old private endpoint** `pe-<storage account>-file` (in the storage resource group). If `privateDnsZoneMode` was `new`, delete that zone too. Deployments don't delete resources, and while the endpoint exists the account's DNS still points at `privatelink`.
+4. **Check a host:** run `Get-FslogixHostDiagnostics.ps1`. In this mode a **public** IP for the storage account is expected and reported as OK.
+
+**Network notes:**
+- **NSG:** if an NSG on the host subnet denies outbound internet, allow TCP 445 outbound to the `Storage.<region>` service tag.
+- **Firewall:** a `0.0.0.0/0` route to a firewall doesn't catch this traffic. The service endpoint adds more specific routes for Azure Storage, so SMB goes direct and no firewall rule is needed.
+- **Entra app:** `Set-FslogixStorageAuth.ps1` still applies. The privatelink names it adds do no harm once the endpoint is gone.
+
 ## Connecting
 
 Users subscribe in Windows App or use the web client at `https://windows.cloud.microsoft`. Because the hosts are Entra-joined, the client device must be Entra joined or registered, or SSO (`enablerdsaadauth`) must be enabled, which is the default here.

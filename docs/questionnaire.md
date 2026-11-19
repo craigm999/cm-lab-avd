@@ -140,7 +140,8 @@ No **inbound** rules are needed: AVD uses reverse connect. If outbound traffic g
 | 8.2 | Profile size cap per user, in MB | `30000` | `fslogixProfileSizeMB` |
 | 8.3 | Share size, in GiB. Premium IOPS scale with size | `10240` | `fslogixShareQuotaGiB` |
 | 8.4 | Redundancy: ZRS (zone-redundant) or LRS | ZRS | `fslogixStorageSku` |
-| 8.5 | `privatelink.file.core.windows.net` DNS zone: **new**, **existing** (give its ID), or **managed by Azure Policy** | | `privateDnsZoneMode` / `existingFilePrivateDnsZoneId`. An existing zone must already be linked to the VNet, or to the hub that provides DNS. |
+| 8.4a | How do hosts reach the share? **Private endpoint** (needs the `privatelink.file` DNS zone) or **service endpoint** (no DNS changes; public endpoint firewalled to the host subnet) | Private endpoint | `fslogixNetworkAccess`. Choose service endpoint if you can't change DNS. |
+| 8.5 | *(private endpoint only)* `privatelink.file.core.windows.net` DNS zone: **new**, **existing** (give its ID), or **managed by Azure Policy** | | `privateDnsZoneMode` / `existingFilePrivateDnsZoneId`. An existing zone must already be linked to the VNet, or to the hub that provides DNS. |
 
 ## 9. Host pool and scaling
 
@@ -157,7 +158,7 @@ No **inbound** rules are needed: AVD uses reverse connect. If outbound traffic g
 - [ ] vCPU quota approved (6.5)
 - [ ] VNet and subnets confirmed in the workload subscription and region (1.3, 4A)
 - [ ] Outbound endpoints open on the firewall (4.6)
-- [ ] DNS can resolve `privatelink.file.core.windows.net` (4A.5 / 8.5)
+- [ ] Private endpoint mode: DNS can resolve `privatelink.file.core.windows.net` (4A.5 / 8.5). Service endpoint mode: the host subnet has, or may be given, the Microsoft.Storage service endpoint (8.4a).
 - [ ] User and admin groups created (5.1, 5.2)
 - [ ] Deployer has the required roles (5.7). Includes the hub VNet if peering (4B.8).
 - [ ] Owner identified for the post-deployment steps: storage admin consent, CA exclusion, NTFS ACLs

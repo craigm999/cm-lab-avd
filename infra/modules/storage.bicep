@@ -1,7 +1,20 @@
 // Azure Files Premium share for FSLogix profile containers.
-// Identity-based access uses Microsoft Entra Kerberos (no AD DS / domain controllers),
-// reached privately via a private endpoint. Shared-key access is disabled.
+// Identity-based access uses Microsoft Entra Kerberos (no AD DS / domain controllers).
+// Shared-key access is disabled. Network access is one of:
+//   privateEndpoint - public access off; a private endpoint + privatelink.file DNS zone
+//   serviceEndpoint - no private endpoint or private DNS; the public endpoint is firewalled
+//                     to the session host subnet, which reaches it over the Microsoft
+//                     backbone through a Microsoft.Storage service endpoint
 param location string
+
+@allowed([
+  'privateEndpoint'
+  'serviceEndpoint'
+])
+param networkAccess string = 'privateEndpoint'
+
+@description('[serviceEndpoint] Subnet allowed through the storage firewall. It must have the Microsoft.Storage service endpoint.')
+param sessionHostSubnetId string = ''
 param storageSku string
 param shareQuotaGiB int
 param privateEndpointSubnetId string
@@ -26,6 +39,7 @@ param logAnalyticsWorkspaceId string
 param defaultSharePermission string = 'StorageFileDataSmbShareContributor'
 param tags object = {}
 
+var usePrivateEndpoint = networkAccess == 'privateEndpoint'
 var storageAccountName = take('stfslogix${uniqueString(resourceGroup().id)}', 24)
 var shareName = 'profiles'
 
@@ -46,10 +60,19 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     supportsHttpsTrafficOnly: true
     allowBlobPublicAccess: false
     allowSharedKeyAccess: false
-    publicNetworkAccess: 'Disabled'
+    publicNetworkAccess: usePrivateEndpoint ? 'Disabled' : 'Enabled'
     networkAcls: {
+      // Deny by default either way; service endpoint mode allows only the session host subnet.
       defaultAction: 'Deny'
       bypass: 'AzureServices'
+      virtualNetworkRules: usePrivateEndpoint
+        ? []
+        : [
+            {
+              id: sessionHostSubnetId
+              action: 'Allow'
+            }
+          ]
     }
     azureFilesIdentityBasedAuthentication: {
       directoryServiceOptions: 'AADKERB'
@@ -92,13 +115,13 @@ resource share 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01
 }
 
 // ----------------------------------------------------------------------------- Private endpoint
-resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (privateDnsZoneMode == 'new') {
+resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (usePrivateEndpoint && privateDnsZoneMode == 'new') {
   name: 'privatelink.file.${environment().suffixes.storage}'
   location: 'global'
   tags: tags
 }
 
-resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (privateDnsZoneMode == 'new') {
+resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (usePrivateEndpoint && privateDnsZoneMode == 'new') {
   parent: privateDnsZone
   name: 'link-avd-vnet'
   location: 'global'
@@ -110,7 +133,7 @@ resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLin
   }
 }
 
-resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = if (usePrivateEndpoint) {
   name: 'pe-${storageAccount.name}-file'
   location: location
   tags: tags
@@ -135,7 +158,7 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
 // With an existing zone (typically in a hub / connectivity subscription) the zone must
 // already be linked to the VNet (or to the hub VNet whose DNS the spoke uses).
 // policyManaged: Azure Policy (DeployIfNotExists) creates the zone group, so none here.
-resource privateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (privateDnsZoneMode != 'policyManaged') {
+resource privateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (usePrivateEndpoint && privateDnsZoneMode != 'policyManaged') {
   parent: privateEndpoint
   name: 'default'
   properties: {

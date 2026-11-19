@@ -167,6 +167,7 @@ if ($p) {
     Assert-Equal $p.resourceGroups.value.hosts.name 'rg-avd-ciexst-uksouth-hosts' 'A hosts RG name'
     Assert-Equal $p.logAnalyticsMode.value 'existing' 'A logAnalyticsMode'
     Assert-Equal $p.privateDnsZoneMode.value 'existing' 'A privateDnsZoneMode'
+    Assert-Equal $p.fslogixNetworkAccess.value 'privateEndpoint' 'A FSLogix via private endpoint (default)'
     Assert-Equal $p.sessionHostCountOverride.value -1 'A sessionHostCountOverride (all hosts)'
     Assert-Equal $p.tags.value.'cost centre' '1234' 'A tag key with space'
     Assert-Equal $p.tags.value.note "it's `${x}" 'A tag value escaping'
@@ -187,6 +188,7 @@ $p = Invoke-Scenario 'new hub-spoke VNet' 'cinew' @(
     , @('Availability zones', '-')
     , @('Log Analytics workspace:', 'new')
     , @('Retention', '60')
+    , @('Profile share network access', 'serviceEndpoint')
     , @('DNS zone:', 'policyManaged')
     , @('Custom DNS server', '10.0.0.4, 10.0.0.5')
     , @('Outbound internet', 'FirewallUdr')
@@ -216,7 +218,7 @@ if ($p) {
     Assert-Equal $p.logAnalyticsRetentionDays.value 60 'B retention'
     Assert-Equal $p.deployScalingPlan.value $false 'B scaling plan off'
     Assert-Equal $p.loadBalancerType.value 'DepthFirst' 'B load balancer'
-    Assert-Equal $p.privateDnsZoneMode.value 'policyManaged' 'B DNS mode'
+    Assert-Equal $p.fslogixNetworkAccess.value 'serviceEndpoint' 'B FSLogix via service endpoint (no DNS question)'
 }
 
 # ------------------------------------------------------------------- 4. Deploy-Avd.ps1 with a fake az
@@ -369,6 +371,27 @@ Assert-Equal ($threw -match 'Private DNS zone conflict') $true 'dns pre-flight (
 Remove-Item $dnsParams -ErrorAction SilentlyContinue
 $global:MockGraph = $false; $global:MockDnsLinks = '[]'; $global:MockZoneList = '[]'; $global:MockZoneLinks = '[]'
 
+# Service endpoint pre-flight: existing subnet without Microsoft.Storage -> stop and print the command
+Write-Host "`n== Deploy-Avd.ps1 service endpoint pre-flight (az mocked)" -ForegroundColor Cyan
+$seParams = Join-Path $repo 'infra/params/cise.bicepparam'
+$seText = ((Get-Content -Raw $exampleParams) -replace "using 'main.bicep'", "using '../main.bicep'").TrimEnd() + "`nparam fslogixNetworkAccess = 'serviceEndpoint'`n"
+[IO.File]::WriteAllText($seParams, $seText)
+$hostSubnet = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-spoke-avd/subnets/snet-avd-hosts'
+$global:AzResponses = [ordered]@{ 'network vnet subnet show --ids*' = '["Microsoft.KeyVault"]' }
+$global:AzCalls.Clear(); $global:HostBuffer.Clear()
+$threw = $null
+try { & $deployScript -ParameterFile $seParams -WhatIf } catch { $threw = "$_" }
+Assert-Equal ($threw -match 'Service endpoint missing') $true 'se pre-flight: missing endpoint stops the run'
+Assert-Equal ((($global:HostBuffer) -join "`n").Contains("az network vnet subnet update --ids $hostSubnet --service-endpoints Microsoft.KeyVault Microsoft.Storage")) $true 'se pre-flight: prints command keeping existing endpoints'
+Assert-Equal (($global:AzCalls -join "`n") -match 'deployment sub') $false 'se pre-flight: nothing deployed'
+$global:AzResponses = [ordered]@{ 'network vnet subnet show --ids*' = '["Microsoft.Storage"]' }
+$threw = $null
+try { & $deployScript -ParameterFile $seParams -WhatIf } catch { $threw = "$_" }
+Assert-Equal ([bool]$threw) $false 'se pre-flight: passes when the endpoint exists'
+Assert-Equal (($global:AzCalls -join "`n") -match 'graph query|private-dns') $false 'se pre-flight: private DNS check skipped in serviceEndpoint mode'
+Remove-Item $seParams -ErrorAction SilentlyContinue
+$global:AzResponses = $null
+
 # Update-SessionHostConfig: one running, one deallocated host
 Write-Host "`n== Update-SessionHostConfig.ps1 (az mocked)" -ForegroundColor Cyan
 $updateScript = Join-Path $repo 'scripts/Update-SessionHostConfig.ps1'
@@ -500,6 +523,7 @@ try {
     $out = ($global:HostBuffer) -join "`n"
     Assert-Equal ($out -match '\[FAIL\] sa1\.file\.core\.windows\.net -> 20\.1\.2\.3 is PUBLIC') $true 'diagnostics: report shown'
     Assert-Equal ($out -match '\[stdout\]') $false 'diagnostics: Run Command noise stripped'
+    Assert-Equal (($global:AzCalls -join "`n") -match '--parameters NetworkAccess=privateEndpoint') $true 'diagnostics: network access mode passed to host'
 }
 catch { $failures.Add("Get-FslogixHostDiagnostics threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 $global:AzResponses = $null

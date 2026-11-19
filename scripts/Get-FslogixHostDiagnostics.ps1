@@ -21,6 +21,7 @@ param(
     [string] $ParameterFile,
     [string] $ResourceGroup
 )
+$networkAccess = $null
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -42,14 +43,18 @@ if ($ParameterFile) {
     $paramText = Get-Content -Raw -LiteralPath $ParameterFile
     if ($paramText -match '(?m)^//\s*subscriptionId:\s*([0-9a-fA-F-]{36})') { $null = Test-Az account set --subscription $Matches[1] --only-show-errors }
     $outputsFile = Join-Path (Split-Path -Parent $ParameterFile) (([IO.Path]::GetFileNameWithoutExtension($ParameterFile)) + '.outputs.json')
-    if (-not $ResourceGroup -and (Test-Path -LiteralPath $outputsFile)) {
-        $ResourceGroup = (Get-Content -Raw -LiteralPath $outputsFile | ConvertFrom-Json).sessionHostResourceGroup.value
+    if (Test-Path -LiteralPath $outputsFile) {
+        $outs = Get-Content -Raw -LiteralPath $outputsFile | ConvertFrom-Json
+        if (-not $ResourceGroup) { $ResourceGroup = $outs.sessionHostResourceGroup.value }
+        if ($outs.PSObject.Properties['fslogixNetworkAccess'] -and $outs.fslogixNetworkAccess.value) { $networkAccess = $outs.fslogixNetworkAccess.value }
     }
+    if (-not $networkAccess -and $paramText -match "(?m)^param\s+fslogixNetworkAccess\s*=\s*'([^']+)'") { $networkAccess = $Matches[1] }
 }
+if (-not $networkAccess) { $networkAccess = 'privateEndpoint' }
 if (-not $ResourceGroup) { throw 'Session host resource group unknown - pass -ResourceGroup (or -ParameterFile after a Deploy-Avd.ps1 run).' }
 
 Write-Host "Running diagnostics on $VmName (takes about a minute)..." -ForegroundColor Cyan
-$r = Test-Az vm run-command invoke --resource-group $ResourceGroup --name $VmName --command-id RunPowerShellScript --scripts "@$hostScript" --query 'value[0].message' -o tsv --only-show-errors
+$r = Test-Az vm run-command invoke --resource-group $ResourceGroup --name $VmName --command-id RunPowerShellScript --scripts "@$hostScript" --parameters "NetworkAccess=$networkAccess" --query 'value[0].message' -o tsv --only-show-errors
 if (-not $r.Ok) { throw "Run Command failed on $VmName. Is the VM running? (az vm start -g $ResourceGroup -n $VmName)" }
 
 Write-Host ''

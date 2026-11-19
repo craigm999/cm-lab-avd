@@ -210,7 +210,30 @@ if ($overlap.Count) {
 # leftover from an earlier attempt that used a different storage RG. Catch that before deploying.
 $dnsMode = Get-ParamValue $paramText 'privateDnsZoneMode' 'new'
 $fslogixOn = (Get-ParamValue $paramText 'deployFslogixStorage' 'true') -ne 'false'
-if ($fslogixOn -and $dnsMode -eq 'new') {
+$fslogixAccess = Get-ParamValue $paramText 'fslogixNetworkAccess' 'privateEndpoint'
+
+# Service endpoint mode on an EXISTING VNet: the template doesn't modify subnets it doesn't
+# own, and the storage firewall rule fails unless the subnet already has Microsoft.Storage.
+if ($fslogixOn -and $fslogixAccess -eq 'serviceEndpoint' -and (Get-ParamValue $paramText 'networkMode' 'new') -eq 'existing') {
+    $seSubnet = Get-ParamValue $paramText 'existingSessionHostSubnetId' ''
+    Write-Step 'Checking the session host subnet has the Microsoft.Storage service endpoint'
+    $sn = Test-Az network vnet subnet show --ids $seSubnet --query 'serviceEndpoints[].service' -o json --only-show-errors
+    if (-not $sn.Ok) { throw "Could not read subnet $seSubnet - check the ID and your access." }
+    $parsedSe = $sn.Output | ConvertFrom-Json
+    $services = @(foreach ($x in $parsedSe) { "$x" })
+    if ($services -notcontains 'Microsoft.Storage' -and $services -notcontains 'Microsoft.Storage.Global') {
+        $all = @($services) + 'Microsoft.Storage'
+        Write-Host ''
+        Write-Host 'The session host subnet does not have the Microsoft.Storage service endpoint.' -ForegroundColor Red
+        Write-Host 'Add it (keeps the endpoints it already has; no downtime for existing traffic):' -ForegroundColor Yellow
+        Write-Host "  az network vnet subnet update --ids $seSubnet --service-endpoints $($all -join ' ')"
+        if ($tempParamFile) { Remove-Item -LiteralPath $tempParamFile -ErrorAction SilentlyContinue }
+        throw 'Service endpoint missing - see above. Nothing was deployed.'
+    }
+    Write-Host '  ok - Microsoft.Storage service endpoint present'
+}
+
+if ($fslogixOn -and $fslogixAccess -eq 'privateEndpoint' -and $dnsMode -eq 'new') {
     $workload = Get-ParamValue $paramText 'workloadName' 'avd'
     $envName = Get-ParamValue $paramText 'environmentName' 'prod'
     $suffix = "$workload-$envName-$Location"

@@ -55,6 +55,12 @@ check "Host restarts after the agent registers (Kerberos setting needs a restart
   'any(.[]; .type=="Microsoft.Compute/virtualMachines/runCommands" and (.name|tostring|test("Restart-AfterBuild")) and ((.dependsOn // []) | map(tostring) | any(test("Microsoft.PowerShell.DSC"))))'
 check "FSLogix share has a default share-level permission (parameterised)" \
   'any(.[]; .type=="Microsoft.Storage/storageAccounts" and (.properties.azureFilesIdentityBasedAuthentication.defaultSharePermission|tostring|test("defaultSharePermission")))'
+check "Private endpoint only deployed in privateEndpoint mode" \
+  'any(.[]; .type=="Microsoft.Network/privateEndpoints" and (.condition|tostring|test("usePrivateEndpoint")))'
+check "Storage firewall allows the session host subnet in serviceEndpoint mode" \
+  'any(.[]; .type=="Microsoft.Storage/storageAccounts" and (.properties.networkAcls.virtualNetworkRules|tostring|test("sessionHostSubnetId")))'
+check "New VNet can add the Microsoft.Storage service endpoint to the host subnet" \
+  'any(.[]; .type=="Microsoft.Network/virtualNetworks" and (.properties.subnets|tostring|test("storageServiceEndpoint")))'
 check "AVD agent runs after Entra join (dependsOn chain)" \
   'any(.[]; .properties.type?=="DSC" and ((.dependsOn // []) | length) > 0)'
 check "Session host VM has SystemAssigned identity" \

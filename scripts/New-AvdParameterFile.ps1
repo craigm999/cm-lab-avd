@@ -477,38 +477,53 @@ $fslogixShareQuotaGiB = 10240
 $fslogixStorageSku = 'Premium_ZRS'
 $privateDnsZoneMode = 'new'
 $existingFilePrivateDnsZoneId = ''
+$fslogixNetworkAccess = 'privateEndpoint'
 if ($deployFslogix) {
     $fslogixProfileSizeMB = Read-Int -Key 'fslogixProfileSizeMB' -Prompt 'Max profile size per user (MB)' -Default 30000 -Min 1000
     $suggested = [int][math]::Max(100, [math]::Ceiling($targetUserCount * 10))
     $fslogixShareQuotaGiB = Read-Int -Key 'fslogixShareQuotaGiB' -Prompt 'Share size (GiB) - ~10 GiB/user is a typical starting point' -Default $suggested -Min 100 -Max 102400
     $fslogixStorageSku = Read-Choice -Key 'fslogixStorageSku' -Prompt 'Storage redundancy:' -Options @('Premium_ZRS', 'Premium_LRS') -Default 'Premium_ZRS'
 
-    Write-Note 'privatelink.file.core.windows.net DNS zone for the storage private endpoint:'
-    Write-Note '  new           - create a zone in the storage RG and link it to the VNet'
-    Write-Note '  existing      - use a central zone (usually in the hub/connectivity subscription)'
-    Write-Note '  policyManaged - Azure Policy creates the DNS record; the template creates none'
-    $dnsDefault = if ($networkMode -eq 'existing') { 'existing' } else { 'new' }
-    $privateDnsZoneMode = Read-Choice -Key 'privateDnsZoneMode' -Prompt 'DNS zone:' -Options @('new', 'existing', 'policyManaged') -Default $dnsDefault
-    if ($privateDnsZoneMode -eq 'existing') {
-        $zonesFound = $null
-        if ($script:HasGraph) {
-            $zonesFound = Invoke-AzJson graph query -q "resources | where type =~ 'microsoft.network/privatednszones' and name startswith 'privatelink.file.' | project name, resourceGroup, subscriptionId, id" --query 'data'
+    Write-Note 'How session hosts reach the profile share:'
+    Write-Note '  privateEndpoint - private endpoint + privatelink.file DNS zone; public access off'
+    Write-Note '  serviceEndpoint - no private endpoint or private DNS needed; the public endpoint is'
+    Write-Note '                    firewalled to the session host subnet (Microsoft backbone, not internet)'
+    $fslogixNetworkAccess = Read-Choice -Key 'fslogixNetworkAccess' -Prompt 'Profile share network access:' -Options @('privateEndpoint', 'serviceEndpoint') -Default 'privateEndpoint'
+    if ($fslogixNetworkAccess -eq 'privateEndpoint') {
+        Write-Note 'privatelink.file.core.windows.net DNS zone for the storage private endpoint:'
+        Write-Note '  new           - create a zone in the storage RG and link it to the VNet'
+        Write-Note '  existing      - use a central zone (usually in the hub/connectivity subscription)'
+        Write-Note '  policyManaged - Azure Policy creates the DNS record; the template creates none'
+        $dnsDefault = if ($networkMode -eq 'existing') { 'existing' } else { 'new' }
+        $privateDnsZoneMode = Read-Choice -Key 'privateDnsZoneMode' -Prompt 'DNS zone:' -Options @('new', 'existing', 'policyManaged') -Default $dnsDefault
+        if ($privateDnsZoneMode -eq 'existing') {
+            $zonesFound = $null
+            if ($script:HasGraph) {
+                $zonesFound = Invoke-AzJson graph query -q "resources | where type =~ 'microsoft.network/privatednszones' and name startswith 'privatelink.file.' | project name, resourceGroup, subscriptionId, id" --query 'data'
+            }
+            elseif ($script:AzOk) {
+                $dnsSub = Read-Answer -Key 'dnsZoneSubscriptionId' -Prompt 'Subscription that holds the zone (hub/connectivity)' -Default $subscriptionId
+                $zonesFound = Invoke-AzJson network private-dns zone list --subscription $dnsSub --query "[?starts_with(name, 'privatelink.file.')].{name:name, resourceGroup:resourceGroup, subscriptionId:'$dnsSub', id:id}"
+            }
+            $existingFilePrivateDnsZoneId = Select-FromList -Key 'existingFilePrivateDnsZoneId' -Prompt 'Existing privatelink.file zone' -Items $zonesFound `
+                -Label { param($z) "$($z.name)  sub=$($z.subscriptionId)  rg=$($z.resourceGroup)" } -Value { param($z) $z.id } `
+                -Validate {
+                param($x)
+                $e = Test-ResourceId $x 'Microsoft.Network/privateDnsZones'; if ($e) { return $e }
+                if ($x -notmatch '/privateDnsZones/privatelink\.file\.') { return 'Must be the privatelink.file.<storage suffix> zone.' }
+            }
+            Write-Note 'The zone must already be linked to this VNet, or to the hub VNet whose DNS this VNet uses.'
         }
-        elseif ($script:AzOk) {
-            $dnsSub = Read-Answer -Key 'dnsZoneSubscriptionId' -Prompt 'Subscription that holds the zone (hub/connectivity)' -Default $subscriptionId
-            $zonesFound = Invoke-AzJson network private-dns zone list --subscription $dnsSub --query "[?starts_with(name, 'privatelink.file.')].{name:name, resourceGroup:resourceGroup, subscriptionId:'$dnsSub', id:id}"
+        elseif ($privateDnsZoneMode -eq 'new' -and $networkMode -eq 'existing') {
+            Write-Warn 'Creating a new zone linked to an existing VNet: if a privatelink.file zone is already linked (e.g. via the hub DNS), this will conflict.'
         }
-        $existingFilePrivateDnsZoneId = Select-FromList -Key 'existingFilePrivateDnsZoneId' -Prompt 'Existing privatelink.file zone' -Items $zonesFound `
-            -Label { param($z) "$($z.name)  sub=$($z.subscriptionId)  rg=$($z.resourceGroup)" } -Value { param($z) $z.id } `
-            -Validate {
-            param($x)
-            $e = Test-ResourceId $x 'Microsoft.Network/privateDnsZones'; if ($e) { return $e }
-            if ($x -notmatch '/privateDnsZones/privatelink\.file\.') { return 'Must be the privatelink.file.<storage suffix> zone.' }
-        }
-        Write-Note 'The zone must already be linked to this VNet, or to the hub VNet whose DNS this VNet uses.'
     }
-    elseif ($privateDnsZoneMode -eq 'new' -and $networkMode -eq 'existing') {
-        Write-Warn 'Creating a new zone linked to an existing VNet: if a privatelink.file zone is already linked (e.g. via the hub DNS), this will conflict.'
+    else {
+        if ($networkMode -eq 'existing') {
+            Write-Note 'The existing session host subnet needs the Microsoft.Storage service endpoint;'
+            Write-Note 'Deploy-Avd.ps1 checks this and prints the az command if it is missing.'
+        }
+        else { Write-Note 'The new session host subnet will get the Microsoft.Storage service endpoint.' }
     }
 }
 
@@ -651,7 +666,7 @@ $summary = [ordered]@{
     'Network'           = if ($networkMode -eq 'existing') { "existing: $existingSessionHostSubnetId" } else { "new: $vnetName $vnetAddressPrefix" }
     'Session hosts'     = "$hostsNeeded x $vmSize ($pilot in first run), $maxSessionsPerHost users each"
     'Log Analytics'     = if ($logAnalyticsMode -eq 'existing') { $existingLogAnalyticsWorkspaceId } else { 'new' }
-    'FSLogix'           = if ($deployFslogix) { "$fslogixShareQuotaGiB GiB $fslogixStorageSku, DNS zone: $privateDnsZoneMode" } else { 'not deployed' }
+    'FSLogix'           = if (-not $deployFslogix) { 'not deployed' } elseif ($fslogixNetworkAccess -eq 'serviceEndpoint') { "$fslogixShareQuotaGiB GiB $fslogixStorageSku, service endpoint (no private DNS)" } else { "$fslogixShareQuotaGiB GiB $fslogixStorageSku, private endpoint, DNS zone: $privateDnsZoneMode" }
     'RG service'        = "$($rgService.name) (create=$($rgService.create))"
     'RG hosts'          = "$($rgHosts.name) (create=$($rgHosts.create))"
 }
@@ -776,6 +791,7 @@ $lines += @(
     "param fslogixProfileSizeMB = $fslogixProfileSizeMB"
     "param fslogixShareQuotaGiB = $fslogixShareQuotaGiB"
     "param fslogixStorageSku = $(ConvertTo-BicepString $fslogixStorageSku)"
+    "param fslogixNetworkAccess = $(ConvertTo-BicepString $fslogixNetworkAccess)"
     "param privateDnsZoneMode = $(ConvertTo-BicepString $privateDnsZoneMode)"
     "param existingFilePrivateDnsZoneId = $(ConvertTo-BicepString $existingFilePrivateDnsZoneId)"
     ''

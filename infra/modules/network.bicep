@@ -17,6 +17,9 @@ param dnsServers array = []
 ])
 param outboundMethod string = 'NatGateway'
 param firewallPrivateIp string = ''
+
+@description('Add the Microsoft.Storage service endpoint to the session host subnet (FSLogix serviceEndpoint mode).')
+param storageServiceEndpoint bool = false
 param tags object = {}
 
 resource nsgHosts 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
@@ -138,6 +141,16 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-05-01' = {
           natGateway: outboundMethod == 'NatGateway' ? { id: natGateway.id } : null
           routeTable: outboundMethod == 'FirewallUdr' ? { id: routeTable.id } : null
           defaultOutboundAccess: false
+          serviceEndpoints: storageServiceEndpoint
+            ? [
+                {
+                  service: 'Microsoft.Storage'
+                  locations: [
+                    location
+                  ]
+                }
+              ]
+            : []
         }
       }
       {

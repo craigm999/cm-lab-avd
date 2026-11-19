@@ -242,6 +242,13 @@ param fslogixProfileSizeMB int = 30000
 ])
 param fslogixDefaultSharePermission string = 'StorageFileDataSmbShareContributor'
 
+@description('How session hosts reach the FSLogix share. privateEndpoint: private endpoint + privatelink.file DNS zone, public access off. serviceEndpoint: no private endpoint or private DNS - the public endpoint is firewalled to the session host subnet via a Microsoft.Storage service endpoint (traffic stays on the Microsoft backbone). With an existing VNet, the subnet must already have the Microsoft.Storage service endpoint (Deploy-Avd.ps1 checks and prints the command).')
+@allowed([
+  'privateEndpoint'
+  'serviceEndpoint'
+])
+param fslogixNetworkAccess string = 'privateEndpoint'
+
 @description('privatelink.file DNS zone: new = create one and link it to the VNet; existing = use existingFilePrivateDnsZoneId (e.g. in a hub/connectivity subscription); policyManaged = create no DNS records (Azure Policy does it).')
 @allowed([
   'new'
@@ -350,6 +357,7 @@ module network 'modules/network.bicep' = if (newNetwork) {
     vnetName: empty(vnetName) ? 'vnet-${nameSuffix}' : vnetName
     vnetAddressPrefix: vnetAddressPrefix
     sessionHostSubnetPrefix: sessionHostSubnetPrefix
+    storageServiceEndpoint: deployFslogixStorage && fslogixNetworkAccess == 'serviceEndpoint'
     privateEndpointSubnetPrefix: privateEndpointSubnetPrefix
     dnsServers: dnsServers
     outboundMethod: outboundMethod
@@ -432,6 +440,8 @@ module fslogixStorage 'modules/storage.bicep' = if (deployFslogixStorage) {
     privateEndpointSubnetId: privateEndpointSubnetId
     vnetId: vnetId
     privateDnsZoneMode: privateDnsZoneMode
+    networkAccess: fslogixNetworkAccess
+    sessionHostSubnetId: sessionHostSubnetId
     existingFilePrivateDnsZoneId: existingFilePrivateDnsZoneId
     avdUsersGroupObjectId: avdUsersGroupObjectId
     avdAdminsGroupObjectId: avdAdminsGroupObjectId
@@ -523,3 +533,4 @@ output sessionHostResourceGroup string = rgHostsName
 output sessionHostSubnetId string = sessionHostSubnetId
 output fslogixStorageAccountName string = deployFslogixStorage ? fslogixStorage!.outputs.storageAccountName : ''
 output fslogixUncPath string = deployFslogixStorage ? fslogixStorage!.outputs.fslogixUncPath : ''
+output fslogixNetworkAccess string = deployFslogixStorage ? fslogixNetworkAccess : ''

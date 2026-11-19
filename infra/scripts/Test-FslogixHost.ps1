@@ -2,6 +2,7 @@
     Runs ON a session host (pushed by scripts/Get-FslogixHostDiagnostics.ps1 via Run Command).
     Read-only. Output is kept short because Run Command returns only ~4 KB.
 #>
+param([string] $NetworkAccess = 'privateEndpoint')   # or serviceEndpoint
 $ErrorActionPreference = 'Continue'
 function Line([string] $State, [string] $Text) { Write-Output ('[{0}] {1}' -f $State, $Text) }
 
@@ -34,12 +35,15 @@ if ($unc -match '^\\\\([^\\]+)\\') {
         $ips = @($res | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
         $private = @($ips | Where-Object { $_ -match '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)' })
         if ($private.Count) { Line OK "$fqdn -> $($ips -join ',') (private endpoint)" }
-        else { Line FAIL "$fqdn -> $($ips -join ',') is PUBLIC - private DNS zone not linked/used by this VNet's DNS" }
-        if (-not ($cnames -match 'privatelink')) { Line WARN 'No privatelink CNAME in the answer' }
+        elseif ($NetworkAccess -eq 'serviceEndpoint') { Line OK "$fqdn -> $($ips -join ',') (public endpoint, reached via the subnet's service endpoint - expected)" }
+        else { Line FAIL "$fqdn -> $($ips -join ',') is PUBLIC - private DNS zone not linked/used by this VNet's DNS (or switch to fslogixNetworkAccess = serviceEndpoint)" }
+        if ($NetworkAccess -eq 'privateEndpoint' -and -not ($cnames -match 'privatelink')) { Line WARN 'No privatelink CNAME in the answer' }
     }
     catch { Line FAIL "DNS lookup of $fqdn failed: $($_.Exception.Message)" }
     $tcp = Test-NetConnection -ComputerName $fqdn -Port 445 -InformationLevel Quiet -WarningAction SilentlyContinue
-    if ($tcp) { Line OK 'TCP 445 reachable' } else { Line FAIL 'TCP 445 NOT reachable - NSG/firewall between hosts and the private endpoint' }
+    if ($tcp) { Line OK 'TCP 445 reachable' }
+    elseif ($NetworkAccess -eq 'serviceEndpoint') { Line FAIL 'TCP 445 NOT reachable - check an NSG outbound rule allows 445 to the Storage service tag' }
+    else { Line FAIL 'TCP 445 NOT reachable - NSG/firewall between hosts and the private endpoint' }
 }
 
 # ---------------------------------------------------------------- FSLogix log

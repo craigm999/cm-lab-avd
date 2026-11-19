@@ -106,7 +106,8 @@ Don't apply TLS break-and-inspect to AVD traffic (`*.wvd.microsoft.com`, `*.wind
 
 | From | To | Port | Notes |
 |---|---|---|---|
-| Session host subnet | Storage private endpoint (PE subnet) | **TCP 445** (SMB) | FSLogix profiles. The template's PE subnet NSG allows this for a new VNet. In an existing VNet, add it yourself. If traffic between subnets goes through an NVA, allow it there too. |
+| Session host subnet | Storage private endpoint (PE subnet) | **TCP 445** (SMB) | FSLogix profiles, `fslogixNetworkAccess = 'privateEndpoint'`. The template's PE subnet NSG allows this for a new VNet. In an existing VNet, add it yourself. If traffic between subnets goes through an NVA, allow it there too. |
+| Session host subnet | `Storage.<region>` service tag | **TCP 445** (SMB) | FSLogix profiles, `fslogixNetworkAccess = 'serviceEndpoint'`. Only needed if an NSG denies outbound internet. The service endpoint routes this traffic directly, so it doesn't pass through a hub firewall. |
 | Session host subnet | Your DNS servers / Private DNS Resolver | TCP/UDP 53 | Only if you use custom DNS. The hosts must resolve `<storage>.file.core.windows.net` to the **private endpoint IP**. |
 
 Azure Files authentication uses Entra Kerberos. Hosts get the Kerberos ticket from `login.microsoftonline.com`, which is already allowed above. No domain controller ports are needed.
