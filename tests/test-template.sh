@@ -71,10 +71,11 @@ check "Session host VM has SystemAssigned identity" \
   'any(.[]; .type=="Microsoft.Compute/virtualMachines" and .identity.type=="SystemAssigned")'
 check "Session host VM uses Trusted Launch" \
   'any(.[]; .type=="Microsoft.Compute/virtualMachines" and .properties.securityProfile.securityType=="TrustedLaunch")'
-check "Host pool is Pooled" \
-  'any(.[]; .type=="Microsoft.DesktopVirtualization/hostPools" and .properties.hostPoolType=="Pooled")'
-check "Host pool maxSessionLimit wired to maxSessionsPerHost" \
-  'any(.[]; .type=="Microsoft.DesktopVirtualization/hostPools" and (.properties.maxSessionLimit|tostring|test("maxSessionsPerHost")))'
+# Host pool properties are a union() expression (Pooled vs Personal), so check its text.
+check "Host pool type comes from the hostPoolType parameter" \
+  'any(.[]; .type=="Microsoft.DesktopVirtualization/hostPools" and (.properties|tostring|test("hostPoolType")))'
+check "Pooled: maxSessionLimit wired to maxSessionsPerHost" \
+  'any(.[]; .type=="Microsoft.DesktopVirtualization/hostPools" and (.properties|tostring|test("maxSessionLimit.*maxSessionsPerHost")))'
 if grep -q 'targetisaadjoined:i:1' "$T"; then pass "targetisaadjoined:i:1 present"; else fail "targetisaadjoined:i:1 missing"; fi
 
 echo "== Capacity maths (host count = ceil(users / per-host))"
