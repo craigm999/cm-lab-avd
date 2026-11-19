@@ -39,7 +39,8 @@ foreach ($file in Get-ChildItem -Path $repo -Recurse -Filter *.ps1) {
 
 # ------------------------------------------------------------------- 2. PSScriptAnalyzer
 Write-Host "`n== PSScriptAnalyzer" -ForegroundColor Cyan
-if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
+if ($env:SKIP_ANALYZER) { Write-Host '  skipped (SKIP_ANALYZER set)' }
+elseif (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
     Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck | Out-Null
 }
 $excluded = @(
@@ -48,13 +49,13 @@ $excluded = @(
     'PSAvoidUsingPlainTextForPassword',
     'PSAvoidUsingConvertToSecureStringWithPlainText' # test fixtures only
 )
-$results = Invoke-ScriptAnalyzer -Path $repo -Recurse -ExcludeRule $excluded
+$results = if ($env:SKIP_ANALYZER) { @() } else { Invoke-ScriptAnalyzer -Path $repo -Recurse -ExcludeRule $excluded }
 foreach ($r in $results) {
     $line = "{0}:{1} [{2}] {3}: {4}" -f $r.ScriptName, $r.Line, $r.Severity, $r.RuleName, $r.Message
     if ($r.Severity -eq 'Error' -or $r.Severity -eq 'ParseError') { $failures.Add($line); Write-Host "  FAIL $line" -ForegroundColor Red }
     else { Write-Host "  warn $line" -ForegroundColor Yellow }
 }
-if (-not $results) { Write-Host '  ok   no findings' -ForegroundColor Green }
+if (-not $results -and -not $env:SKIP_ANALYZER) { Write-Host '  ok   no findings' -ForegroundColor Green }
 
 # ------------------------------------------------------------------- 3. Questionnaire E2E
 # Read-Host / Write-Host are replaced with functions (functions win over cmdlets).
@@ -120,7 +121,9 @@ function Invoke-Scenario([string] $Name, [string] $Env, [object[]] $Answers) {
     Get-Content $bicepparam | ForEach-Object { Microsoft.PowerShell.Utility\Write-Host "    $_" }
 
     $json = Join-Path ([IO.Path]::GetTempPath()) "$Env.parameters.json"
-    $out = & az bicep build-params --file $bicepparam --outfile $json 2>&1
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'   # 5.1: redirected stderr + Stop would throw
+    $out = & az bicep build-params --file $bicepparam --outfile $json 2>&1 | Out-String
+    $ErrorActionPreference = $eap
     if ($LASTEXITCODE -ne 0) {
         $failures.Add("Scenario '$Name': az bicep build-params failed: $out")
         Microsoft.PowerShell.Utility\Write-Host "  FAIL build-params: $out" -ForegroundColor Red

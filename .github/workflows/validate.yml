@@ -33,3 +33,24 @@ jobs:
       - name: PowerShell tests
         shell: pwsh
         run: ./tests/Test-PowerShell.ps1
+
+  powershell-windows:
+    name: PowerShell on Windows (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]   # Windows PowerShell 5.1 and PowerShell 7
+    env:
+      AVD_LOCAL_ADMIN_PASSWORD: ci-placeholder-not-a-real-password-1!
+      SKIP_ANALYZER: '1'            # analyzer already runs in the Linux job
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bicep
+        shell: pwsh
+        run: az bicep install; az bicep version
+      - name: PowerShell tests
+        shell: ${{ matrix.shell }}
+        run: |
+          $PSVersionTable.PSVersion
+          ./tests/Test-PowerShell.ps1
