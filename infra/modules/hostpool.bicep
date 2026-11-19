@@ -3,6 +3,20 @@
 param location string
 param nameSuffix string
 param hostPoolName string
+
+@description('Pooled (shared, multi-session) or Personal (1:1 - each user gets their own VM).')
+@allowed([
+  'Pooled'
+  'Personal'
+])
+param hostPoolType string = 'Pooled'
+
+@description('[Personal] Automatic: a user gets a free desktop the first time they connect. Direct: an admin assigns users to desktops (scripts/Set-AvdPersonalAssignment.ps1).')
+@allowed([
+  'Automatic'
+  'Direct'
+])
+param personalAssignmentType string = 'Automatic'
 param maxSessionsPerHost int
 param loadBalancerType string
 param enableSingleSignOn bool
@@ -25,6 +39,11 @@ var entraRdpProperties = enableSingleSignOn
   : 'targetisaadjoined:i:1;'
 var baseRdpProperties = 'drivestoredirect:s:;audiomode:i:0;videoplaybackmode:i:1;redirectclipboard:i:1;redirectprinters:i:1;devicestoredirect:s:;redirectcomports:i:0;redirectsmartcards:i:1;usbdevicestoredirect:s:;enablecredsspsupport:i:1;use multimon:i:1;autoreconnection enabled:i:1;bandwidthautodetect:i:1;networkautodetect:i:1;audiocapturemode:i:1;encode redirected video capture:i:1;camerastoredirect:s:*;'
 
+var isPersonal = hostPoolType == 'Personal'
+// Host pool type can't be changed in place, so personal resources get their own names and
+// can sit alongside an existing pooled deployment (the shared workspace is reused).
+var poolTag = isPersonal ? '-personal' : ''
+
 // Built-in role: Desktop Virtualization User
 var desktopVirtualizationUserRoleId = '1d18fff3-a72a-46b5-b4a9-0b38a3cd7e63'
 
@@ -32,11 +51,10 @@ resource hostPool 'Microsoft.DesktopVirtualization/hostPools@2024-04-03' = {
   name: hostPoolName
   location: location
   tags: tags
-  properties: {
+  properties: union({
     friendlyName: hostPoolName
-    hostPoolType: 'Pooled'
-    loadBalancerType: loadBalancerType
-    maxSessionLimit: maxSessionsPerHost
+    hostPoolType: hostPoolType
+    loadBalancerType: isPersonal ? 'Persistent' : loadBalancerType
     preferredAppGroupType: 'Desktop'
     startVMOnConnect: true
     validationEnvironment: false
@@ -55,11 +73,15 @@ resource hostPool 'Microsoft.DesktopVirtualization/hostPools@2024-04-03' = {
         }
       ]
     }
-  }
+  }, isPersonal ? {
+    personalDesktopAssignmentType: personalAssignmentType
+  } : {
+    maxSessionLimit: maxSessionsPerHost
+  })
 }
 
 resource desktopAppGroup 'Microsoft.DesktopVirtualization/applicationGroups@2024-04-03' = {
-  name: 'vdag-${nameSuffix}-desktop'
+  name: 'vdag-${nameSuffix}${poolTag}-desktop'
   location: location
   tags: tags
   properties: {
@@ -95,7 +117,7 @@ resource appGroupAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01'
 // ----------------------------------------------------------------------------- Autoscale
 // Keeps a minimum of hosts warm off-peak and powers hosts on/off as demand changes,
 // so all 100 hosts are not running 24x7.
-resource scalingPlan 'Microsoft.DesktopVirtualization/scalingPlans@2024-04-03' = if (deployScalingPlan) {
+resource scalingPlan 'Microsoft.DesktopVirtualization/scalingPlans@2024-04-03' = if (deployScalingPlan && !isPersonal) {
   name: 'vdscaling-${nameSuffix}'
   location: location
   tags: tags
@@ -188,6 +210,78 @@ resource scalingPlan 'Microsoft.DesktopVirtualization/scalingPlans@2024-04-03' =
   }
 }
 
+// Personal autoscale: start a user's VM when they connect, and deallocate it after they
+// disconnect or sign out, so 1:1 desktops don't run (and bill) when nobody is using them.
+resource scalingPlanPersonal 'Microsoft.DesktopVirtualization/scalingPlans@2024-04-03' = if (deployScalingPlan && isPersonal) {
+  name: 'vdscaling-${nameSuffix}${poolTag}'
+  location: location
+  tags: tags
+  properties: {
+    friendlyName: 'Autoscale - ${hostPoolName}'
+    hostPoolType: 'Personal'
+    timeZone: scalingPlanTimeZone
+    exclusionTag: 'ExcludeFromScaling'
+    hostPoolReferences: [
+      {
+        hostPoolArmPath: hostPool.id
+        scalingPlanEnabled: true
+      }
+    ]
+  }
+}
+
+var personalScheduleDays = {
+  Weekdays: [
+    'Monday'
+    'Tuesday'
+    'Wednesday'
+    'Thursday'
+    'Friday'
+  ]
+  Weekends: [
+    'Saturday'
+    'Sunday'
+  ]
+}
+
+resource personalSchedules 'Microsoft.DesktopVirtualization/scalingPlans/personalSchedules@2024-04-03' = [
+  for day in items(personalScheduleDays): if (deployScalingPlan && isPersonal) {
+    parent: scalingPlanPersonal
+    name: day.key
+    properties: {
+      daysOfWeek: day.value
+      // Ramp-up: no pre-starting; VMs start when their user connects.
+      rampUpStartTime: { hour: 7, minute: 0 }
+      rampUpAutoStartHosts: 'None'
+      rampUpStartVMOnConnect: 'Enable'
+      rampUpActionOnDisconnect: 'None'
+      rampUpMinutesToWaitOnDisconnect: 0
+      rampUpActionOnLogoff: 'Deallocate'
+      rampUpMinutesToWaitOnLogoff: 15
+      // Peak: be generous - users step away during the working day.
+      peakStartTime: { hour: 9, minute: 0 }
+      peakStartVMOnConnect: 'Enable'
+      peakActionOnDisconnect: 'Deallocate'
+      peakMinutesToWaitOnDisconnect: 120
+      peakActionOnLogoff: 'Deallocate'
+      peakMinutesToWaitOnLogoff: 15
+      // Ramp-down / off-peak: power off sooner.
+      rampDownStartTime: { hour: 18, minute: 0 }
+      rampDownStartVMOnConnect: 'Enable'
+      rampDownActionOnDisconnect: 'Deallocate'
+      rampDownMinutesToWaitOnDisconnect: 60
+      rampDownActionOnLogoff: 'Deallocate'
+      rampDownMinutesToWaitOnLogoff: 5
+      offPeakStartTime: { hour: 20, minute: 0 }
+      offPeakStartVMOnConnect: 'Enable'
+      offPeakActionOnDisconnect: 'Deallocate'
+      offPeakMinutesToWaitOnDisconnect: 30
+      offPeakActionOnLogoff: 'Deallocate'
+      offPeakMinutesToWaitOnLogoff: 5
+    }
+  }
+]
+
 // ----------------------------------------------------------------------------- Diagnostics
 resource hostPoolDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   name: 'diag-to-law'
@@ -231,9 +325,23 @@ resource workspaceDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview
   }
 }
 
-resource scalingPlanDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (deployScalingPlan) {
+resource scalingPlanDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (deployScalingPlan && !isPersonal) {
   name: 'diag-to-law'
   scope: scalingPlan
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        categoryGroup: 'allLogs'
+        enabled: true
+      }
+    ]
+  }
+}
+
+resource scalingPlanPersonalDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (deployScalingPlan && isPersonal) {
+  name: 'diag-to-law'
+  scope: scalingPlanPersonal
   properties: {
     workspaceId: logAnalyticsWorkspaceId
     logs: [

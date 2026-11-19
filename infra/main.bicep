@@ -1,8 +1,9 @@
 // =====================================================================================
-// Azure Virtual Desktop - Entra ID joined (no Intune) pooled environment
+// Azure Virtual Desktop - Entra ID joined (no Intune) environment
 //
-// Sizing: capacity for `targetUserCount` concurrent users at `maxSessionsPerHost`
-// users per session host  =>  ceil(1000 / 10) = 100 session hosts by default.
+// hostPoolType = 'Pooled'   : `targetUserCount` concurrent users at `maxSessionsPerHost`
+//                             users per host => ceil(1000 / 10) = 100 session hosts.
+// hostPoolType = 'Personal' : 1:1 - one desktop VM per user => `targetUserCount` hosts.
 //
 // Works with NEW or EXISTING resource groups, virtual network, Log Analytics workspace
 // and private DNS zone. Run scripts/New-AvdParameterFile.ps1 (or fill in
@@ -70,6 +71,21 @@ param resourceGroups resourceGroupsConfig = {
   network: { name: '', create: true }
   monitor: { name: '', create: true }
 }
+
+// ----------------------------------------------------------------------------- Host pool type
+@description('Pooled: shared multi-session hosts. Personal: 1:1, each user gets their own VM. The type of an existing host pool cannot be changed; Personal creates separate (-personal) host pool, app group and scaling plan and reuses the workspace.')
+@allowed([
+  'Pooled'
+  'Personal'
+])
+param hostPoolType string = 'Pooled'
+
+@description('[Personal] Automatic: a user gets a free desktop on first connection. Direct: admins assign users to desktops (scripts/Set-AvdPersonalAssignment.ps1).')
+@allowed([
+  'Automatic'
+  'Direct'
+])
+param personalAssignmentType string = 'Automatic'
 
 // ----------------------------------------------------------------------------- Capacity
 @description('Number of concurrent users the pool must support.')
@@ -217,8 +233,8 @@ param deployScalingPlan bool = true
 param scalingPlanTimeZone string = 'GMT Standard Time'
 
 // ----------------------------------------------------------------------------- FSLogix
-@description('Deploy an Azure Files Premium share for FSLogix profile containers using Entra Kerberos.')
-param deployFslogixStorage bool = true
+@description('Deploy an Azure Files Premium share for FSLogix profile containers using Entra Kerberos. Defaults to on for Pooled and off for Personal (profiles stay on each user\'s own VM).')
+param deployFslogixStorage bool = hostPoolType == 'Pooled'
 
 @description('FSLogix share quota in GiB. Premium Files IOPS scale with provisioned size.')
 @minValue(100)
@@ -284,8 +300,9 @@ var allTags = union(tags, {
   environment: environmentName
 })
 
-// Integer ceiling division: hosts needed to serve targetUserCount at maxSessionsPerHost.
-var requiredSessionHosts = (targetUserCount + maxSessionsPerHost - 1) / maxSessionsPerHost
+var isPersonal = hostPoolType == 'Personal'
+// Pooled: integer ceiling division of users by sessions per host. Personal: one VM per user.
+var requiredSessionHosts = isPersonal ? targetUserCount : (targetUserCount + maxSessionsPerHost - 1) / maxSessionsPerHost
 var sessionHostCount = sessionHostCountOverride >= 0 ? sessionHostCountOverride : requiredSessionHosts
 
 // Resolve resource group names (empty => default convention).
@@ -307,7 +324,7 @@ var rgNamesToCreate = union(
   (newLogAnalytics && resourceGroups.monitor.create) ? [rgMonitorName] : []
 )
 
-var hostPoolName = 'vdpool-${nameSuffix}'
+var hostPoolName = 'vdpool-${nameSuffix}${isPersonal ? '-personal' : ''}'
 
 // Existing VNet ID is derived from the subnet ID.
 var existingVnetId = newNetwork ? '' : substring(existingSessionHostSubnetId, 0, indexOf(toLower(existingSessionHostSubnetId), '/subnets/'))
@@ -411,6 +428,8 @@ module hostPool 'modules/hostpool.bicep' = {
     location: location
     nameSuffix: nameSuffix
     hostPoolName: hostPoolName
+    hostPoolType: hostPoolType
+    personalAssignmentType: personalAssignmentType
     maxSessionsPerHost: maxSessionsPerHost
     loadBalancerType: loadBalancerType
     enableSingleSignOn: enableSingleSignOn
@@ -527,7 +546,8 @@ output hostPoolName string = hostPool.outputs.hostPoolName
 output workspaceName string = hostPool.outputs.workspaceName
 output sessionHostsRequired int = requiredSessionHosts
 output sessionHostsDeployedThisRun int = sessionHostCount
-output totalSessionCapacity int = requiredSessionHosts * maxSessionsPerHost
+output totalSessionCapacity int = isPersonal ? requiredSessionHosts : requiredSessionHosts * maxSessionsPerHost
+output hostPoolType string = hostPoolType
 output resourceGroupsCreated array = rgNamesToCreate
 output sessionHostResourceGroup string = rgHostsName
 output sessionHostSubnetId string = sessionHostSubnetId

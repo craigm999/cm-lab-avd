@@ -163,7 +163,8 @@ $users = [int](Get-ParamValue $paramText 'targetUserCount' '1000')
 $perHost = [int](Get-ParamValue $paramText 'maxSessionsPerHost' '10')
 $start = [int](Get-ParamValue $paramText 'sessionHostStartIndex' '0')
 $override = [int](Get-ParamValue $paramText 'sessionHostCountOverride' '-1')
-$count = if ($override -ge 0) { $override } else { [int][math]::Ceiling($users / $perHost) }
+$personalPool = (Get-ParamValue $paramText 'hostPoolType' 'Pooled') -eq 'Personal'
+$count = if ($override -ge 0) { $override } elseif ($personalPool) { $users } else { [int][math]::Ceiling($users / $perHost) }
 
 $deployParamFile = $ParameterFile
 $tempParamFile = $null
@@ -187,6 +188,16 @@ else {
     Write-Host '  This run     : no session hosts (shared resources only)'
 }
 Write-Host ''
+
+# ARM allows at most 800 resources per deployment; each host is one nested deployment.
+$maxHostsPerRun = 400
+if ($count -gt $maxHostsPerRun) {
+    Write-Host ("This run would deploy {0} hosts. One deployment can create at most about {1} reliably" -f $count, $maxHostsPerRun) -ForegroundColor Yellow
+    Write-Host '(ARM limit: 800 resources per deployment). Deploy in batches instead, e.g.:' -ForegroundColor Yellow
+    Write-Host "  .\scripts\Deploy-Avd.ps1 -ParameterFile $ParameterFile -AddHosts $maxHostsPerRun    (repeat until done)"
+    if ($tempParamFile) { Remove-Item -LiteralPath $tempParamFile -ErrorAction SilentlyContinue }
+    throw "Too many hosts for one run ($count)."
+}
 
 if ($overlap.Count) {
     Write-Host ("WARNING: this run would redeploy {0} host(s) that already exist ({1}-{2:D3} to {1}-{3:D3})." -f $overlap.Count, $prefix, $overlap[0], $overlap[-1]) -ForegroundColor Yellow

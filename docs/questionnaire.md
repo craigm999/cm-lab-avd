@@ -114,7 +114,9 @@ No **inbound** rules are needed: AVD uses reverse connect. If outbound traffic g
 
 | # | Question | Answer | Parameter / notes |
 |---|---|---|---|
-| 6.1 | Concurrent users to support | `1000` | `targetUserCount` |
+| 6.0 | Desktop type: **Pooled** (shared multi-session) or **Personal** (1:1, one VM per user) | Pooled | `hostPoolType`. Personal multiplies the VM count and quota: 1,000 users = 1,000 VMs. |
+| 6.0a | *(Personal)* Assignment: **Automatic** (on first connection) or **Direct** (admin assigns) | Automatic | `personalAssignmentType` |
+| 6.1 | Users to support (Pooled: concurrent users; Personal: one desktop each) | `1000` | `targetUserCount` |
 | 6.2 | Users per host | `10` | `maxSessionsPerHost`, which gives 100 hosts |
 | 6.3 | Typical workload: light / medium / heavy / graphics | | Drives `vmSize` |
 | 6.4 | VM size | `Standard_D8s_v5` | `vmSize`. 100 hosts × 8 vCPU = **800 vCPU of quota** |

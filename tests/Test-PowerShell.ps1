@@ -425,6 +425,49 @@ Assert-Equal (($global:AzCalls -join "`n") -match 'graph query|private-dns') $fa
 Remove-Item $seParams -ErrorAction SilentlyContinue
 $global:AzResponses = $null
 
+# Deploy-Avd: personal pool of 1000 -> one host per user -> too many for one run
+Write-Host "`n== Deploy-Avd.ps1 batch guard (az mocked)" -ForegroundColor Cyan
+$pdParams = Join-Path $repo 'infra/params/cipdbig.bicepparam'
+$pdText = ((Get-Content -Raw $exampleParams) -replace "using 'main.bicep'", "using '../main.bicep'").TrimEnd() + "`nparam hostPoolType = 'Personal'`n"
+[IO.File]::WriteAllText($pdParams, $pdText)
+$global:AzResponses = $null; $global:MockVmNames = '[]'; $global:AzCalls.Clear(); $global:HostBuffer.Clear()
+$threw = $null
+try { & $deployScript -ParameterFile $pdParams -WhatIf } catch { $threw = "$_" }
+Assert-Equal ($threw -match 'Too many hosts for one run \(1000\)') $true 'deploy: personal 1000 users = 1000 hosts, blocked as one run'
+$threw = $null
+try { & $deployScript -ParameterFile $pdParams -AddHosts 400 -WhatIf } catch { $threw = "$_" }
+Assert-Equal ([bool]$threw) $false 'deploy: -AddHosts 400 batch allowed'
+Remove-Item $pdParams -ErrorAction SilentlyContinue
+
+# Set-AvdPersonalAssignment: -FromGroup fills free desktops, skips users who already have one
+Write-Host "`n== Set-AvdPersonalAssignment.ps1 (az mocked)" -ForegroundColor Cyan
+$assignScript = Join-Path $repo 'scripts/Set-AvdPersonalAssignment.ps1'
+$pdPool = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-svc/providers/Microsoft.DesktopVirtualization/hostPools/vdpool-x-personal'
+$global:AzResponses = [ordered]@{
+    'resource list --resource-type Microsoft.DesktopVirtualization/hostPools --name*' = '["' + $pdPool + '"]'
+    'resource show --ids */hostPools/*' = 'Personal'
+    'rest --method get --url https://management.azure.com*' = '[{"name":"vdpool-x-personal/avdpd-001","user":"alice@contoso.com"},{"name":"vdpool-x-personal/avdpd-002","user":null},{"name":"vdpool-x-personal/avdpd-003","user":null}]'
+    'ad group list --display-name*' = '["g-1"]'
+    'ad group member list*' = '["alice@contoso.com","bob@contoso.com","carol@contoso.com","dave@contoso.com"]'
+    'rest --method patch*' = ''
+}
+$global:AzCalls.Clear(); $global:HostBuffer.Clear()
+try {
+    & $assignScript -HostPoolName 'vdpool-x-personal' -FromGroup 'AVD Users'
+    $patches = @($global:AzCalls | Where-Object { $_ -like 'rest --method patch*' })
+    Assert-Equal $patches.Count 2 'assign: two free desktops filled'
+    Assert-Equal ($patches[0] -match 'sessionHosts/avdpd-002\?api-version') $true 'assign: first free desktop used'
+    $out = ($global:HostBuffer) -join "`n"
+    Assert-Equal ($out -match '3 group member\(s\) without a desktop, 2 free desktop\(s\)') $true 'assign: alice (already assigned) skipped'
+    Assert-Equal ($out -match '1 user\(s\) left without a desktop') $true 'assign: shortfall reported'
+}
+catch { $failures.Add("Set-AvdPersonalAssignment threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+$global:AzResponses['resource show --ids */hostPools/*'] = 'Pooled'
+$threw = $null
+try { & $assignScript -HostPoolName 'vdpool-x-personal' -User 'x@contoso.com' -SessionHost 'avdpd-002' } catch { $threw = "$_" }
+Assert-Equal ($threw -match 'only apply to Personal host pools') $true 'assign: refuses a pooled host pool'
+$global:AzResponses = $null
+
 # Update-SessionHostConfig: one running, one deallocated host
 Write-Host "`n== Update-SessionHostConfig.ps1 (az mocked)" -ForegroundColor Cyan
 $updateScript = Join-Path $repo 'scripts/Update-SessionHostConfig.ps1'
@@ -466,6 +509,7 @@ function New-AccessMock([hashtable] $Overrides) {
         'resource show --ids */workspaces/*'  = '["' + $svc + '/applicationGroups/ag1"]'
         'role assignment list --resource-group*' = '[{"pid":"g-users","role":"Virtual Machine User Login","name":"AVD Users"}]'
         'rest --method get --url https://management.azure.com*' = '[{"name":"vdpool-x/avdsh-001","status":"Available","allow":true,"sessions":0}]'
+        'resource show --ids */hostPools/* --query {type*' = '{"type":"Pooled","assign":null}'
         'resource show --ids */hostPools/*' = 'targetisaadjoined:i:1;enablerdsaadauth:i:1;'
         'rest --method get --url https://graph.microsoft.com*' = 'true'
     }
@@ -592,6 +636,30 @@ if ($env:OS -eq 'Windows_NT') {
 }
 
 Remove-Item Function:\az -ErrorAction SilentlyContinue
+
+# --- Scenario C: personal (1:1) desktops, direct assignment ------------------------
+$p = Invoke-Scenario 'personal 1:1 desktops' 'cipd' @(
+    , @('tenant ID', $tenant)
+    , @('Workload subscription', $sub)
+    , @('Session host virtual network', 'new')
+    , @('Azure region', 'uksouth')
+    , @('Environment name', 'cipd')
+    , @('Desktop type', 'Personal')
+    , @('Number of users', '50')
+    , @('Desktop assignment', 'Direct')
+    , @('Log Analytics workspace:', 'new')
+    , @('already exist', 'n')
+    , @('AVD users group', '11111111-1111-1111-1111-111111111111')
+)
+if ($p) {
+    Assert-Equal $p.hostPoolType.value 'Personal' 'C host pool type'
+    Assert-Equal $p.personalAssignmentType.value 'Direct' 'C assignment type'
+    Assert-Equal $p.targetUserCount.value 50 'C users'
+    Assert-Equal $p.sessionHostNamePrefix.value 'avdpd' 'C personal name prefix default'
+    Assert-Equal $p.vmSize.value 'Standard_D4s_v5' 'C personal VM size default'
+    Assert-Equal $p.deployFslogixStorage.value $false 'C FSLogix off by default for personal'
+    Assert-Equal $p.sessionHostCountOverride.value -1 'C all 50 desktops in first run'
+}
 
 Remove-Item (Join-Path $paramsDir 'ci*') -ErrorAction SilentlyContinue
 

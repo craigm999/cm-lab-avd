@@ -160,13 +160,25 @@ else { Write-Result WARN 'Session host resource group unknown - skipped.' 'Pass 
 
 # ------------------------------------------------------------------ 5. Hosts
 Write-Section '5. Session hosts'
-$sh = @(ConvertFrom-AzJson (Test-Az rest --method get --url "https://management.azure.com$hostPoolId/sessionHosts?api-version=2024-04-03" --query 'value[].{name:name, status:properties.status, allow:properties.allowNewSession, sessions:properties.sessions}' -o json --only-show-errors).Output)
+$sh = @(ConvertFrom-AzJson (Test-Az rest --method get --url "https://management.azure.com$hostPoolId/sessionHosts?api-version=2024-04-03" --query 'value[].{name:name, status:properties.status, allow:properties.allowNewSession, sessions:properties.sessions, user:properties.assignedUser}' -o json --only-show-errors).Output)
 if (-not $sh.Count) { Write-Result FAIL 'No session hosts registered in the host pool.' 'Check the host deployment (Deploy-Avd.ps1) and the AVD agent on the VM.' }
 foreach ($h in $sh) {
     $name = ("$($h.name)" -split '/')[-1]
     if ($h.status -eq 'Available' -and $h.allow -ne $false) { Write-Result PASS "$name is Available ($($h.sessions) session(s))." }
     elseif ($h.allow -eq $false) { Write-Result WARN "$name is in drain mode (not accepting new sessions)." 'Host pool > Session hosts > Turn on new sessions.' }
     else { Write-Result WARN "$name status: $($h.status)." "'Unavailable' with Start VM on Connect is normal for a stopped host; 'NeedsAssistance'/'Upgrading' needs a look." }
+}
+
+$poolInfo = $null
+$pi = Test-Az resource show --ids $hostPoolId --query '{type:properties.hostPoolType, assign:properties.personalDesktopAssignmentType}' -o json --only-show-errors
+if ($pi.Ok -and $pi.Output) { try { $poolInfo = $pi.Output | ConvertFrom-Json } catch { $poolInfo = $null } }
+if ($poolInfo -and "$($poolInfo.type)" -eq 'Personal') {
+    $mine = @($sh | Where-Object { "$($_.user)" -ieq "$($u.upn)" -or ($u.mail -and "$($_.user)" -ieq "$($u.mail)") })
+    $freeCount = @($sh | Where-Object { -not $_.user }).Count
+    if ($mine.Count) { Write-Result PASS ("Personal desktop assigned: {0}" -f (("$($mine[0].name)" -split '/')[-1])) }
+    elseif ("$($poolInfo.assign)" -eq 'Direct') { Write-Result FAIL 'Personal pool with Direct assignment and no desktop assigned to this user - nothing will show in Windows App.' 'Run scripts\Set-AvdPersonalAssignment.ps1 -User <upn> -SessionHost <host> (or -FromGroup).' }
+    elseif ($freeCount -gt 0) { Write-Result PASS "Automatic assignment: the user will get one of $freeCount free desktop(s) on first connection." }
+    else { Write-Result FAIL 'Automatic assignment but no free desktops left.' 'Add hosts: Deploy-Avd.ps1 -AddHosts <n>.' }
 }
 
 # ------------------------------------------------------------------ 6. SSO

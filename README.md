@@ -200,6 +200,57 @@ Session hosts deploy 20 at a time. A full 100-host deployment takes roughly 45�
 
 Each run refreshes the host pool registration token (valid for 8 hours by default).
 
+## Personal (1:1) desktops
+
+Set `hostPoolType = 'Personal'` and every user gets their own VM instead of sharing multi-session hosts.
+
+| | Pooled (default) | Personal |
+|---|---|---|
+| Hosts | `ceil(users / maxSessionsPerHost)`, e.g. 100 for 1,000 users | **One VM per user**, e.g. 1,000 for 1,000 users |
+| Suggested size | `Standard_D8s_v5` (10 users each) | `Standard_D4s_v5` (D2s_v5 for light use) |
+| vCPU quota for 1,000 users | 800 | **4,000** with D4s_v5 |
+| User profiles | FSLogix on Azure Files | On the user's own VM. FSLogix is off by default and optional. |
+| Assignment | Load-balanced | `personalAssignmentType`: **Automatic** (a user gets a free desktop on first connection) or **Direct** (you assign) |
+| Autoscale | Hosts on and off by demand | Each VM starts when its user connects. It's deallocated 15 min after sign-out or 2 h after a disconnect (shorter out of hours). |
+
+The type of an existing host pool can't be changed, so a personal deployment creates its **own** host pool, app group and scaling plan (`…-personal`). It reuses everything else: network, resource groups, Log Analytics, role assignments and the **workspace**.
+
+### Moving from pooled to personal
+
+1. **Create a parameter file for personal.** Re-run the questionnaire with your previous answers as defaults and choose *Personal*:
+   ```powershell
+   .\scripts\New-AvdParameterFile.ps1 -AnswersFile .\infra\params\prod.answers.json
+   ```
+   Or set `hostPoolType = 'Personal'`, `personalAssignmentType`, `sessionHostNamePrefix = 'avdpd'` (so names don't clash with the pooled `avdsh-*` hosts), `vmSize` and `deployFslogixStorage = false` in a copy of your file.
+2. **Deploy a pilot**, e.g. `sessionHostCountOverride = 2`:
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
+   ```
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam
+   ```
+   The workspace now publishes the **personal** desktop, and the pooled one disappears from users' feeds.
+3. **Assign users** (Direct only; Automatic assigns on first connection):
+   ```powershell
+   .\scripts\Set-AvdPersonalAssignment.ps1 -ParameterFile .\infra\params\prod.bicepparam -FromGroup 'AVD Users' -WhatIf
+   ```
+   It gives every group member who has no desktop yet the next free one. You can also use `-User` with `-SessionHost`, or `-CsvPath` with columns `User,SessionHost`. `Test-AvdUserAccess.ps1` shows whether a user has a desktop assigned.
+4. **Scale out in batches of up to 400.** ARM allows 800 resources per deployment, and `Deploy-Avd.ps1` refuses larger single runs:
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -AddHosts 400
+   ```
+   Repeat until you have one VM per user. Request the vCPU quota first.
+5. **Remove the pooled deployment** once nobody uses it. The template doesn't delete anything:
+   - **Session hosts:** delete the `avdsh-*` VMs. Deleting a VM removes its NIC and disk. Then remove them from the pooled host pool (*Host pool → Session hosts*).
+   - **Pooled AVD objects:** delete the pooled scaling plan, then the app group `vdag-…-desktop`, then the host pool `vdpool-…` (without `-personal`).
+   - **Entra devices:** delete the `avdsh-*` objects in *Entra ID → Devices*.
+   - **FSLogix (optional):** delete the storage account and its `[Storage Account] …` app registration if nothing else uses them.
+
+**Notes:**
+- **Profiles live on the VM.** If a personal VM is rebuilt, its profile goes with it. Use OneDrive Known Folder Move, or keep FSLogix (`deployFslogixStorage = true`), if user data must survive a rebuild.
+- **Image:** the default Windows 11 *multi-session* + Microsoft 365 image works for personal pools. For single-session, set `imageReference` to e.g. `MicrosoftWindowsDesktop` / `windows-11` / `win11-24h2-ent` (no Microsoft 365 Apps preinstalled).
+- **Start VM on Connect** is enabled. It needs the AVD service principal's *Power On Off Contributor* role, which the deployment assigns when `avdServicePrincipalObjectId` is set.
+
 ## Updating an existing deployment
 
 Keep **one parameter file per environment** (for example `infra/params/prod.bicepparam`) as the source of truth. Change it, preview with `-WhatIf`, then deploy. Re-run the questionnaire with `-AnswersFile infra/params/prod.answers.json` if you'd rather answer prompts than edit the file.

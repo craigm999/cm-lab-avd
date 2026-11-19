@@ -385,7 +385,13 @@ $workloadName = Read-Answer -Key 'workloadName' -Prompt 'Workload short name (2-
 $environmentName = Read-Answer -Key 'environmentName' -Prompt 'Environment name (max 6 chars, e.g. prod, dev)' -Default 'prod' -Validate {
     param($x) if ($x -notmatch '^[a-z0-9]{1,6}$') { 'Use 1-6 lowercase letters/numbers.' }
 }
-$sessionHostNamePrefix = Read-Answer -Key 'sessionHostNamePrefix' -Prompt 'Session host name prefix (max 10 chars; hosts become <prefix>-001...)' -Default 'avdsh' -Validate {
+Write-Note 'Desktop type:'
+Write-Note '  Pooled   - users share multi-session hosts (e.g. 10 per host)'
+Write-Note '  Personal - 1:1, every user gets their own VM (one VM per user)'
+$hostPoolType = Read-Choice -Key 'hostPoolType' -Prompt 'Desktop type:' -Options @('Pooled', 'Personal') -Default 'Pooled'
+$isPersonal = $hostPoolType -eq 'Personal'
+$prefixDefault = if ($isPersonal) { 'avdpd' } else { 'avdsh' }
+$sessionHostNamePrefix = Read-Answer -Key 'sessionHostNamePrefix' -Prompt 'Session host name prefix (max 10 chars; hosts become <prefix>-001...)' -Default $prefixDefault -Validate {
     param($x) if ($x -notmatch '^[a-zA-Z][a-zA-Z0-9-]{0,9}$') { 'Up to 10 letters, numbers or hyphens, starting with a letter.' }
 }
 $tagsRaw = Read-Answer -Key 'tags' -Prompt 'Tags as key=value pairs separated by ; (e.g. owner=IT;costCentre=1234)' -AllowEmpty -Validate {
@@ -399,12 +405,27 @@ $nameSuffix = "$workloadName-$environmentName-$location"
 # -------------------------------------------------------------------------------------
 Write-Section '4. Capacity and session hosts'
 # -------------------------------------------------------------------------------------
-$targetUserCount = Read-Int -Key 'targetUserCount' -Prompt 'Concurrent users to support' -Default 1000 -Min 1
-$maxSessionsPerHost = Read-Int -Key 'maxSessionsPerHost' -Prompt 'Users per session host' -Default 10 -Min 1
-$hostsNeeded = [int][math]::Ceiling($targetUserCount / $maxSessionsPerHost)
-Write-Ok "$hostsNeeded session hosts required."
+$personalAssignmentType = 'Automatic'
+if ($isPersonal) {
+    $targetUserCount = Read-Int -Key 'targetUserCount' -Prompt 'Number of users (each gets their own desktop VM)' -Default 1000 -Min 1
+    $maxSessionsPerHost = 1
+    $hostsNeeded = $targetUserCount
+    Write-Note 'Assignment: Automatic - a user gets a free desktop on first connection;'
+    Write-Note '            Direct    - you assign users to desktops (scripts\Set-AvdPersonalAssignment.ps1).'
+    $personalAssignmentType = Read-Choice -Key 'personalAssignmentType' -Prompt 'Desktop assignment:' -Options @('Automatic', 'Direct') -Default 'Automatic'
+    Write-Ok "$hostsNeeded desktop VMs required (1:1)."
+    if ($hostsNeeded -gt 400) { Write-Note 'Large pools are deployed in batches of up to 400 (Deploy-Avd.ps1 -AddHosts 400, repeated).' }
+}
+else {
+    $targetUserCount = Read-Int -Key 'targetUserCount' -Prompt 'Concurrent users to support' -Default 1000 -Min 1
+    $maxSessionsPerHost = Read-Int -Key 'maxSessionsPerHost' -Prompt 'Users per session host' -Default 10 -Min 1
+    $hostsNeeded = [int][math]::Ceiling($targetUserCount / $maxSessionsPerHost)
+    Write-Ok "$hostsNeeded session hosts required."
+}
 
-$vmSize = Read-Answer -Key 'vmSize' -Prompt 'VM size' -Default 'Standard_D8s_v5'
+$vmSizeDefault = if ($isPersonal) { 'Standard_D4s_v5' } else { 'Standard_D8s_v5' }
+if ($isPersonal) { Write-Note 'Personal desktops host one user each: Standard_D4s_v5 (4 vCPU/16 GiB) for knowledge workers, D2s_v5 for light use.' }
+$vmSize = Read-Answer -Key 'vmSize' -Prompt 'VM size' -Default $vmSizeDefault
 $vcpu = $null
 $sku = Invoke-AzJson vm list-sizes --location $location --subscription $subscriptionId --query "[?name=='$vmSize'] | [0]"
 if ($sku) {
@@ -432,7 +453,8 @@ if ($networkMode -eq 'existing') {
     }
 }
 
-$pilot = Read-Int -Key 'initialHostCount' -Prompt "Hosts to deploy in the first run (pilot), or $hostsNeeded for all" -Default $hostsNeeded -Min 0 -Max $hostsNeeded
+$pilotDefault = [math]::Min($hostsNeeded, 400)
+$pilot = Read-Int -Key 'initialHostCount' -Prompt "Hosts to deploy in the first run (pilot, max 400 per run), or $hostsNeeded for all" -Default $pilotDefault -Min 0 -Max $hostsNeeded
 $imageChoice = Read-Choice -Key 'imageSource' -Prompt 'Session host image:' -Options @('marketplace', 'gallery') -Default 'marketplace'
 $galleryImageId = ''
 $marketplaceSku = 'win11-24h2-avd-m365'
@@ -471,7 +493,8 @@ else {
 # -------------------------------------------------------------------------------------
 Write-Section '6. User profiles (FSLogix)'
 # -------------------------------------------------------------------------------------
-$deployFslogix = Read-YesNo -Key 'deployFslogixStorage' -Prompt 'Deploy Azure Files Premium for FSLogix profiles (Entra Kerberos)?' -Default $true
+if ($isPersonal) { Write-Note 'Personal desktops keep the profile on the user''s own VM, so FSLogix is optional (default: no).' }
+$deployFslogix = Read-YesNo -Key 'deployFslogixStorage' -Prompt 'Deploy Azure Files Premium for FSLogix profiles (Entra Kerberos)?' -Default (-not $isPersonal)
 $fslogixProfileSizeMB = 30000
 $fslogixShareQuotaGiB = 10240
 $fslogixStorageSku = 'Premium_ZRS'
@@ -645,7 +668,11 @@ $enableSso = Read-YesNo -Key 'enableSingleSignOn' -Prompt 'Enable Entra ID singl
 Write-Section '10. Host pool and scaling'
 # -------------------------------------------------------------------------------------
 $desktopFriendlyName = Read-Answer -Key 'desktopFriendlyName' -Prompt 'Desktop name shown to users' -Default 'Corporate Desktop'
-$loadBalancerType = Read-Choice -Key 'loadBalancerType' -Prompt 'Load balancing:' -Options @('BreadthFirst', 'DepthFirst') -Default 'BreadthFirst'
+$loadBalancerType = 'BreadthFirst'
+if (-not $isPersonal) {
+    $loadBalancerType = Read-Choice -Key 'loadBalancerType' -Prompt 'Load balancing:' -Options @('BreadthFirst', 'DepthFirst') -Default 'BreadthFirst'
+}
+else { Write-Note 'Personal pools: autoscale starts each VM when its user connects and deallocates it after sign-out / long disconnects.' }
 $deployScalingPlan = Read-YesNo -Key 'deployScalingPlan' -Prompt 'Deploy autoscale scaling plan?' -Default $true
 $tz = 'GMT Standard Time'
 if ($deployScalingPlan) {
@@ -664,7 +691,7 @@ $summary = [ordered]@{
     'Subscription'      = $subscriptionId
     'Region'            = $location
     'Network'           = if ($networkMode -eq 'existing') { "existing: $existingSessionHostSubnetId" } else { "new: $vnetName $vnetAddressPrefix" }
-    'Session hosts'     = "$hostsNeeded x $vmSize ($pilot in first run), $maxSessionsPerHost users each"
+    'Session hosts'     = if ($isPersonal) { "Personal 1:1 ($personalAssignmentType): $hostsNeeded x $vmSize ($pilot in first run)" } else { "Pooled: $hostsNeeded x $vmSize ($pilot in first run), $maxSessionsPerHost users each" }
     'Log Analytics'     = if ($logAnalyticsMode -eq 'existing') { $existingLogAnalyticsWorkspaceId } else { 'new' }
     'FSLogix'           = if (-not $deployFslogix) { 'not deployed' } elseif ($fslogixNetworkAccess -eq 'serviceEndpoint') { "$fslogixShareQuotaGiB GiB $fslogixStorageSku, service endpoint (no private DNS)" } else { "$fslogixShareQuotaGiB GiB $fslogixStorageSku, private endpoint, DNS zone: $privateDnsZoneMode" }
     'RG service'        = "$($rgService.name) (create=$($rgService.create))"
@@ -756,7 +783,9 @@ else {
 $lines += @(
     ''
     '// ---------------------------------------------------------------- Capacity / session hosts'
-    "// $targetUserCount users / $maxSessionsPerHost per host = $hostsNeeded session hosts"
+    $(if ($isPersonal) { "// Personal (1:1): $targetUserCount users = $hostsNeeded desktop VMs" } else { "// $targetUserCount users / $maxSessionsPerHost per host = $hostsNeeded session hosts" })
+    "param hostPoolType = $(ConvertTo-BicepString $hostPoolType)"
+    "param personalAssignmentType = $(ConvertTo-BicepString $personalAssignmentType)"
     "param targetUserCount = $targetUserCount"
     "param maxSessionsPerHost = $maxSessionsPerHost"
     "param sessionHostCountOverride = $countOverride"

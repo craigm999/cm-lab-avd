@@ -61,6 +61,10 @@ check "Storage firewall allows the session host subnet in serviceEndpoint mode" 
   'any(.[]; .type=="Microsoft.Storage/storageAccounts" and (.properties.networkAcls.virtualNetworkRules|tostring|test("sessionHostSubnetId")))'
 check "New VNet can add the Microsoft.Storage service endpoint to the host subnet" \
   'any(.[]; .type=="Microsoft.Network/virtualNetworks" and (.properties.subnets|tostring|test("storageServiceEndpoint")))'
+check "Host pool supports Personal (assignment type + Persistent load balancing)" \
+  'any(.[]; .type=="Microsoft.DesktopVirtualization/hostPools" and (.properties|tostring|test("personalDesktopAssignmentType")) and (.properties|tostring|test("Persistent")))'
+check "Personal autoscale schedules (start on connect, deallocate on disconnect/logoff)" \
+  'any(.[]; .type=="Microsoft.DesktopVirtualization/scalingPlans/personalSchedules" and (.properties.peakActionOnDisconnect=="Deallocate") and (.properties.rampUpStartVMOnConnect=="Enable"))'
 check "AVD agent runs after Entra join (dependsOn chain)" \
   'any(.[]; .properties.type?=="DSC" and ((.dependsOn // []) | length) > 0)'
 check "Session host VM has SystemAssigned identity" \
@@ -76,6 +80,7 @@ if grep -q 'targetisaadjoined:i:1' "$T"; then pass "targetisaadjoined:i:1 presen
 echo "== Capacity maths (host count = ceil(users / per-host))"
 expr="$(jq -r '.variables.requiredSessionHosts' "$T")"
 echo "    requiredSessionHosts = $expr"
+if [[ "$expr" == *"isPersonal"* && "$expr" == *"targetUserCount"* ]]; then pass "personal pools: one host per user"; else fail "personal pools: one host per user"; fi
 python3 - "$expr" <<'PY' || FAIL=1
 import sys, re, math
 expr = sys.argv[1]
