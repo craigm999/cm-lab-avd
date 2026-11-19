@@ -14,6 +14,15 @@
     * Registers the required resource providers if they are not registered.
     * -WhatIf runs `az deployment sub what-if`; otherwise you are asked to confirm before
       `az deployment sub create` (skip with -Force).
+    * Updating an existing deployment:
+        -AddHosts N   finds the highest existing host number (e.g. avdsh-100) and deploys
+                      N new hosts after it (avdsh-101...). Existing hosts are not touched.
+        -InfraOnly    deploys everything except session hosts (host pool settings, scaling
+                      plan, FSLogix storage, network, RBAC). Existing hosts are not touched.
+      Without either, the script warns if the run would redeploy hosts that already exist
+      (which re-runs their extensions and fails on hosts autoscale has stopped).
+    * Saves the deployment outputs to <param file name>.outputs.json next to the parameter
+      file (used by Update-SessionHostConfig.ps1).
 
     Requires the Azure CLI (winget install Microsoft.AzureCLI) and an `az login`.
 
@@ -22,6 +31,14 @@
 
 .EXAMPLE
     .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam
+
+.EXAMPLE
+    # Add 20 more session hosts after the existing ones
+    .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -AddHosts 20 -WhatIf
+
+.EXAMPLE
+    # Apply a change to shared resources only (e.g. enable FSLogix storage, change scaling plan)
+    .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -InfraOnly
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -34,10 +51,16 @@ param(
 
     [string] $DeploymentName = ('avd-' + (Get-Date -Format 'yyyyMMddHHmmss')),
 
+    [ValidateRange(0, 1000)]
+    [int] $AddHosts = 0,
+
+    [switch] $InfraOnly,
+
     [switch] $Force
 )
 
 $ErrorActionPreference = 'Stop'
+if ($AddHosts -gt 0 -and $InfraOnly) { throw 'Use either -AddHosts or -InfraOnly, not both.' }
 $preview = [bool]$WhatIfPreference
 # Our own calls must not be suppressed by -WhatIf; we branch on $preview instead.
 $WhatIfPreference = $false
@@ -64,6 +87,18 @@ function Test-Az {
         return [pscustomobject]@{ Ok = ($LASTEXITCODE -eq 0); Output = (($out | Out-String).Trim()) }
     }
     finally { $ErrorActionPreference = $eap }
+}
+
+function Get-ParamValue([string] $Text, [string] $Name, [string] $Default) {
+    # Reads `param <Name> = <value>` from a .bicepparam (simple scalars only).
+    if ($Text -match "(?m)^param\s+$Name\s*=\s*'?([^'\r\n]*?)'?\s*(//.*)?$") { return $Matches[1].Trim() }
+    return $Default
+}
+
+function Set-ParamValue([string] $Text, [string] $Name, [string] $Value) {
+    $pattern = "(?m)^param\s+$Name\s*=.*$"
+    if ($Text -match $pattern) { return [regex]::Replace($Text, $pattern, "param $Name = $Value") }
+    return $Text.TrimEnd() + "`nparam $Name = $Value`n"
 }
 
 function Write-Step([string] $Text) { Write-Host "==> $Text" -ForegroundColor Cyan }
@@ -98,6 +133,73 @@ Write-Host ('  Parameters   : {0}' -f $ParameterFile)
 Write-Host ('  Mode         : {0}' -f $(if ($preview) { 'what-if (preview, no changes)' } else { 'CREATE / UPDATE' }))
 Write-Host ''
 
+# ------------------------------------------------------------------ Session host plan
+$paramDir = Split-Path -Parent $ParameterFile
+$paramBase = [IO.Path]::GetFileNameWithoutExtension($ParameterFile)
+$outputsFile = Join-Path $paramDir "$paramBase.outputs.json"
+
+$prefix = Get-ParamValue $paramText 'sessionHostNamePrefix' 'avdsh'
+$hostsRg = $null
+if (Test-Path -LiteralPath $outputsFile) {
+    try { $hostsRg = (Get-Content -Raw -LiteralPath $outputsFile | ConvertFrom-Json).sessionHostResourceGroup.value } catch { $hostsRg = $null }
+}
+if (-not $hostsRg -and $paramText -match "(?s)hosts:\s*\{\s*name:\s*'([^']*)'") { $hostsRg = $Matches[1] }
+if (-not $hostsRg) {
+    $hostsRg = 'rg-{0}-{1}-{2}-hosts' -f (Get-ParamValue $paramText 'workloadName' 'avd'), (Get-ParamValue $paramText 'environmentName' 'prod'), $Location
+}
+
+$existingNumbers = @()
+$vmList = Test-Az vm list --resource-group $hostsRg --query '[].name' -o json --only-show-errors
+if ($vmList.Ok -and $vmList.Output) {
+    $pattern = '^' + [regex]::Escape($prefix) + '-(\d+)$'
+    $existingNumbers = @($vmList.Output | ConvertFrom-Json | ForEach-Object { if ($_ -match $pattern) { [int]$Matches[1] } } | Sort-Object)
+}
+$highest = if ($existingNumbers.Count) { $existingNumbers[-1] } else { 0 }
+
+$users = [int](Get-ParamValue $paramText 'targetUserCount' '1000')
+$perHost = [int](Get-ParamValue $paramText 'maxSessionsPerHost' '10')
+$start = [int](Get-ParamValue $paramText 'sessionHostStartIndex' '0')
+$override = [int](Get-ParamValue $paramText 'sessionHostCountOverride' '-1')
+$count = if ($override -ge 0) { $override } else { [int][math]::Ceiling($users / $perHost) }
+
+$deployParamFile = $ParameterFile
+$tempParamFile = $null
+if ($InfraOnly -or $AddHosts -gt 0) {
+    if ($InfraOnly) { $start = 0; $count = 0 } else { $start = $highest; $count = $AddHosts }
+    $newText = Set-ParamValue $paramText 'sessionHostStartIndex' $start
+    $newText = Set-ParamValue $newText 'sessionHostCountOverride' $count
+    # Must sit beside the original so its relative `using` path still resolves.
+    $tempParamFile = Join-Path $paramDir "$paramBase.deploy-tmp.bicepparam"
+    [IO.File]::WriteAllText($tempParamFile, $newText, (New-Object System.Text.UTF8Encoding($false)))
+    $deployParamFile = $tempParamFile
+}
+
+$planned = @(); for ($i = $start; $i -lt $start + $count; $i++) { $planned += ($i + 1) }
+$overlap = @($planned | Where-Object { $existingNumbers -contains $_ })
+Write-Host ('  Hosts RG     : {0} ({1} existing {2}-nnn host(s){3})' -f $hostsRg, $existingNumbers.Count, $prefix, $(if ($highest) { ", highest $prefix-{0:D3}" -f $highest } else { '' }))
+if ($count -gt 0) {
+    Write-Host ('  This run     : session hosts {0}-{1:D3} to {0}-{2:D3} ({3})' -f $prefix, $planned[0], $planned[-1], $count)
+}
+else {
+    Write-Host '  This run     : no session hosts (shared resources only)'
+}
+Write-Host ''
+
+if ($overlap.Count) {
+    Write-Host ("WARNING: this run would redeploy {0} host(s) that already exist ({1}-{2:D3} to {1}-{3:D3})." -f $overlap.Count, $prefix, $overlap[0], $overlap[-1]) -ForegroundColor Yellow
+    Write-Host '  Their extensions would re-run with a new registration token, and the run fails on any host' -ForegroundColor Yellow
+    Write-Host '  autoscale has stopped. To add hosts use -AddHosts <n>; to change shared settings use -InfraOnly.' -ForegroundColor Yellow
+    Write-Host ''
+    if (-not $preview -and -not $Force) {
+        $answer = Read-Host 'Type redeploy to continue anyway'
+        if ($answer -ne 'redeploy') {
+            if ($tempParamFile) { Remove-Item -LiteralPath $tempParamFile -ErrorAction SilentlyContinue }
+            Write-Host 'Cancelled.' -ForegroundColor Yellow
+            return
+        }
+    }
+}
+
 # ------------------------------------------------------------------ Password
 $setPassword = $false
 if (-not $env:AVD_LOCAL_ADMIN_PASSWORD) {
@@ -107,6 +209,7 @@ if (-not $env:AVD_LOCAL_ADMIN_PASSWORD) {
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
     $setPassword = $true
     if ($env:AVD_LOCAL_ADMIN_PASSWORD.Length -lt 12) {
+        if ($tempParamFile) { Remove-Item -LiteralPath $tempParamFile -ErrorAction SilentlyContinue }
         Remove-Item Env:\AVD_LOCAL_ADMIN_PASSWORD
         throw 'Password must be at least 12 characters (Azure requirement).'
     }
@@ -125,7 +228,7 @@ try {
     }
 
     $common = @('--name', $DeploymentName, '--location', $Location,
-        '--template-file', $template, '--parameters', $ParameterFile, '--only-show-errors')
+        '--template-file', $template, '--parameters', $deployParamFile, '--only-show-errors')
 
     if ($preview) {
         Write-Step 'Running what-if (no changes will be made)'
@@ -147,7 +250,9 @@ try {
         throw "Deployment failed. Details: az deployment sub show --name $DeploymentName  (or the subscription's Deployments blade in the portal)."
     }
 
-    $outputs = ($result -join "`n") | ConvertFrom-Json
+    $outputsJson = ($result -join "`n")
+    $outputs = $outputsJson | ConvertFrom-Json
+    [IO.File]::WriteAllText($outputsFile, $outputsJson, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host ''
     Write-Host 'Deployment succeeded.' -ForegroundColor Green
     foreach ($p in $outputs.PSObject.Properties) {
@@ -156,8 +261,10 @@ try {
         Write-Host ('  {0,-28} {1}' -f $p.Name, $v)
     }
     Write-Host ''
+    Write-Host "Outputs saved to $outputsFile"
     Write-Host 'Next: the post-deployment steps in README.md (storage admin consent, CA exclusion, NTFS permissions).'
 }
 finally {
     if ($setPassword) { Remove-Item Env:\AVD_LOCAL_ADMIN_PASSWORD -ErrorAction SilentlyContinue }
+    if ($tempParamFile) { Remove-Item -LiteralPath $tempParamFile -ErrorAction SilentlyContinue }
 }

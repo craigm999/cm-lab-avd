@@ -224,12 +224,22 @@ if ($p) {
 Write-Host "`n== Deploy-Avd.ps1 (az mocked)" -ForegroundColor Cyan
 $global:AzCalls = [System.Collections.Generic.List[string]]::new()
 $global:PasswordSeenByAz = $null
+$global:DeployParamText = $null
+$global:MockVmNames = '[]'
+$global:MockVmPower = '[]'
 function global:az {
     $line = ($args | ForEach-Object { "$_" }) -join ' '
     $global:AzCalls.Add($line)
     $global:LASTEXITCODE = 0
-    if ($line -like 'deployment sub*') { $global:PasswordSeenByAz = $env:AVD_LOCAL_ADMIN_PASSWORD }
+    if ($line -like 'deployment sub*') {
+        $global:PasswordSeenByAz = $env:AVD_LOCAL_ADMIN_PASSWORD
+        $i = [array]::IndexOf([string[]]$args, '--parameters')
+        if ($i -ge 0) { $global:DeployParamText = Get-Content -Raw -LiteralPath $args[$i + 1] }
+    }
     switch -Wildcard ($line) {
+        'vm list --resource-group * --show-details*' { return $global:MockVmPower }
+        'vm list --resource-group *' { return $global:MockVmNames }
+        'vm run-command show*' { return 'Succeeded' }
         'account show --query*' { return '{"name":"Test Sub","id":"00000000-0000-0000-0000-000000000000"}' }
         'account show*'         { return '{}' }
         'bicep version*'        { return 'Bicep CLI version 0.49.2' }
@@ -268,6 +278,61 @@ try {
     Assert-Equal $env:AVD_LOCAL_ADMIN_PASSWORD 'From-Env-Passw0rd!' 'deploy: existing env password left in place'
 }
 catch { $failures.Add("Deploy-Avd create threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+# -AddHosts: existing hosts 001, 002, 020 (plus an unrelated VM) -> new hosts start at 021
+$global:MockVmNames = '["avdsh-001","avdsh-002","avdsh-020","jumpbox-01"]'
+$global:AzCalls.Clear(); $global:DeployParamText = $null
+try {
+    & $deployScript -ParameterFile $exampleParams -AddHosts 5 -WhatIf
+    Assert-Equal ($global:DeployParamText -match '(?m)^param sessionHostStartIndex = 20\s*$') $true 'deploy -AddHosts: start index after highest existing host'
+    Assert-Equal ($global:DeployParamText -match '(?m)^param sessionHostCountOverride = 5\s*$') $true 'deploy -AddHosts: host count'
+    Assert-Equal (($global:AzCalls -join "`n") -match 'main\.deploy-tmp\.bicepparam') $true 'deploy -AddHosts: uses temporary param file'
+    Assert-Equal (Test-Path (Join-Path $repo 'infra/main.deploy-tmp.bicepparam')) $false 'deploy -AddHosts: temporary param file removed'
+}
+catch { $failures.Add("Deploy-Avd -AddHosts threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
+# -InfraOnly -> zero hosts
+$global:AzCalls.Clear(); $global:DeployParamText = $null
+try {
+    & $deployScript -ParameterFile $exampleParams -InfraOnly -WhatIf
+    Assert-Equal ($global:DeployParamText -match '(?m)^param sessionHostCountOverride = 0\s*$') $true 'deploy -InfraOnly: no session hosts'
+}
+catch { $failures.Add("Deploy-Avd -InfraOnly threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
+# Plain run over existing hosts -> overlap warning; with -Force it proceeds and saves outputs
+$global:HostBuffer.Clear()
+$outputsPath = Join-Path $repo 'infra/main.outputs.json'
+Remove-Item $outputsPath -ErrorAction SilentlyContinue
+try {
+    & $deployScript -ParameterFile $exampleParams -Force -DeploymentName 'avd-ci2'
+    Assert-Equal ((($global:HostBuffer) -join "`n") -match 'would redeploy 3 host\(s\) that already exist') $true 'deploy: warns before redeploying existing hosts'
+    Assert-Equal (Test-Path $outputsPath) $true 'deploy: outputs saved next to param file'
+}
+catch { $failures.Add("Deploy-Avd overlap run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+Remove-Item $outputsPath -ErrorAction SilentlyContinue
+
+# Update-SessionHostConfig: one running, one deallocated host
+Write-Host "`n== Update-SessionHostConfig.ps1 (az mocked)" -ForegroundColor Cyan
+$updateScript = Join-Path $repo 'scripts/Update-SessionHostConfig.ps1'
+$global:MockVmPower = '[{"name":"avdsh-001","power":"VM running"},{"name":"avdsh-002","power":"VM deallocated"}]'
+$unc = '\\stfslogixtest.file.core.windows.net\profiles'
+$global:AzCalls.Clear()
+try {
+    & $updateScript -ResourceGroup 'rg-hosts' -VhdLocation $unc
+    $calls = $global:AzCalls -join "`n"
+    Assert-Equal ($calls -match 'vm run-command create --resource-group rg-hosts --vm-name avdsh-001 --name Configure-SessionHost --script @\S+Configure-SessionHost\.ps1 --parameters FslogixEnabled=True VhdLocation=\\\\stfslogixtest\.file\.core\.windows\.net\\profiles ProfileSizeMB=30000') $true 'update: run command pushed to running host'
+    Assert-Equal ($calls -match 'vm-name avdsh-002') $false 'update: stopped host skipped by default'
+    Assert-Equal ($calls -match 'vm start') $false 'update: does not start hosts by default'
+}
+catch { $failures.Add("Update-SessionHostConfig threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+$global:AzCalls.Clear()
+try {
+    & $updateScript -ResourceGroup 'rg-hosts' -VhdLocation $unc -IncludeStopped
+    $calls = $global:AzCalls -join "`n"
+    Assert-Equal ($calls -match 'vm start --resource-group rg-hosts --name avdsh-002') $true 'update -IncludeStopped: starts stopped host'
+    Assert-Equal ($calls -match 'run-command create --resource-group rg-hosts --vm-name avdsh-002') $true 'update -IncludeStopped: configures it'
+}
+catch { $failures.Add("Update-SessionHostConfig -IncludeStopped threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
 Remove-Item Function:\az -ErrorAction SilentlyContinue
 
 Remove-Item (Join-Path $paramsDir 'ci*') -ErrorAction SilentlyContinue

@@ -49,6 +49,8 @@ check "AVD agent DSC registers with aadJoin = true" \
   'any(.[]; .properties.type?=="DSC" and .properties.settings.properties.aadJoin==true)'
 check "AVD agent DSC has empty mdmId" \
   'any(.[]; .properties.type?=="DSC" and .properties.settings.properties.mdmId=="")'
+check "FSLogix/Kerberos run command completes BEFORE the agent registers the host" \
+  'any(.[]; .properties.type?=="DSC" and ((.dependsOn // []) | map(tostring) | any(test("runCommands"))))'
 check "AVD agent runs after Entra join (dependsOn chain)" \
   'any(.[]; .properties.type?=="DSC" and ((.dependsOn // []) | length) > 0)'
 check "Session host VM has SystemAssigned identity" \

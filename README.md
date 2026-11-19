@@ -85,7 +85,8 @@ infra/
     Configure-SessionHost.ps1  # run command: FSLogix + Kerberos registry settings
 scripts/
   New-AvdParameterFile.ps1   # interactive questionnaire -> infra/params/<env>.bicepparam
-  Deploy-Avd.ps1             # deploy / -WhatIf from Windows (PowerShell)
+  Deploy-Avd.ps1             # deploy / -WhatIf / -AddHosts / -InfraOnly (Windows PowerShell)
+  Update-SessionHostConfig.ps1  # re-apply FSLogix/Kerberos settings to existing hosts
   deploy.sh                  # same, for macOS / Linux
   Enable-EntraSSO.ps1        # one-off tenant config for Entra SSO
 ```
@@ -95,8 +96,8 @@ scripts/
 Each VM has a **system-assigned managed identity**, and the deployment installs these extensions in order:
 
 1. **`AADLoginForWindows`**: joins the VM to Microsoft Entra ID. The extension gets **no `mdmId` setting**, so the device is *not* enrolled in Intune.
-2. **AVD DSC**: installs the AVD agent and registers the VM with the host pool, using `aadJoin: true` and `mdmId: ''`.
-3. **Run command**: applies the FSLogix and Entra Kerberos registry settings. Intune would normally push these settings, so here they are set directly.
+2. **Run command**: applies the FSLogix and Entra Kerberos registry settings. Intune would normally push these settings, so here they are set directly. This happens *before* registration, so no user can land on a half-configured host.
+3. **AVD DSC**: installs the AVD agent and registers the VM with the host pool, using `aadJoin: true` and `mdmId: ''`.
 
 The host pool's RDP properties include `targetisaadjoined:i:1` and, when SSO is enabled, `enablerdsaadauth:i:1`.
 
@@ -183,24 +184,69 @@ Session hosts deploy 20 at a time. A full 100-host deployment takes roughly 45�
 
 2. **Keep the pilot host on while testing.** Autoscale can power off a single host outside business hours. Tag the VM `ExcludeFromScaling` (the plan's exclusion tag), or set `deployScalingPlan = false` for the pilot run. Start VM on Connect wakes a stopped host when someone signs in either way.
 
-3. **Add the remaining hosts.** Edit the same parameter file and run it again:
-   ```bicep
-   param sessionHostCountOverride = 99
-   param sessionHostStartIndex = 1
+3. **Add the remaining hosts.**
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -AddHosts 99 -WhatIf
    ```
    ```powershell
-   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -AddHosts 99
    ```
-   ```powershell
-   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam
-   ```
-   This creates `avdsh-002` to `avdsh-100` and leaves `avdsh-001` untouched. Zone placement continues round-robin, so the final spread is still 34/33/33. The shared resources are redeployed with the same values, so nothing changes on them. Raise the vCPU quota to 800 before this run.
+   This creates `avdsh-002` to `avdsh-100` and leaves `avdsh-001` untouched. Zone placement continues round-robin, so the final spread is still 34/33/33. Raise the vCPU quota to 800 before this run. You can also add hosts in batches (`-AddHosts 20`, then `-AddHosts 20`, …).
 
-To keep going in batches, set the start index to the number of hosts already deployed. For example, use `sessionHostStartIndex = 21` with `sessionHostCountOverride = 79` after hosts 001–021.
-
-> Don't put `sessionHostStartIndex` back to `0` with the full count after the pilot. That redeploys the pilot host's extensions with a new registration token. It's harmless but unnecessary.
+   On macOS/Linux with `deploy.sh`, set `sessionHostStartIndex = 1` and `sessionHostCountOverride = 99` in the file instead.
 
 Each run refreshes the host pool registration token (valid for 8 hours by default).
+
+## Updating an existing deployment
+
+Keep **one parameter file per environment** (for example `infra/params/prod.bicepparam`) as the source of truth. Change it, preview with `-WhatIf`, then deploy. Re-run the questionnaire with `-AnswersFile infra/params/prod.answers.json` if you'd rather answer prompts than edit the file.
+
+Two rules keep updates safe:
+
+- **Don't touch existing hosts by accident.** Use `-AddHosts` or `-InfraOnly`. Without them, a run that includes host numbers that already exist re-runs those hosts' setup steps. Azure refuses that on hosts autoscale has stopped, so the run fails. `Deploy-Avd.ps1` warns and asks before doing it.
+- **Make changes in the parameter file, not the portal.** The deployment re-applies host pool, app group and scaling plan settings, so a portal change is reverted on the next run.
+
+Deployments are incremental. Resources you remove from the template, or switch off (for example `deployFslogixStorage = false`), are **not** deleted. Delete them yourself if you really mean to.
+
+| I want to… | Do this |
+|---|---|
+| **Add more hosts** | `.\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -AddHosts 20 -WhatIf`, then without `-WhatIf`. It finds the highest existing host (e.g. `avdsh-100`) and adds `avdsh-101` to `avdsh-120`, continuing the zone spread. Check vCPU quota and free subnet IPs first. Raise `targetUserCount` in the file too, so the file still describes the environment. |
+| **Add FSLogix profiles** to a deployment that didn't have them | See the steps below. |
+| **Change host pool settings** (max sessions, load balancing, RDP properties, SSO, scaling schedule) | Edit the parameter file (schedules are in `infra/modules/hostpool.bicep`), then run `Deploy-Avd.ps1 -InfraOnly`. Takes effect immediately. A lower max sessions limit applies to new connections. |
+| **Change profile size or share path** on existing hosts | Edit the file, then run `Deploy-Avd.ps1 -InfraOnly` (if storage changed) and `Update-SessionHostConfig.ps1 -IncludeStopped`. |
+| **New image, VM size or Windows build** | Replace hosts rather than changing them in place. Run `-AddHosts N` with the new `imageReference` / `vmSize` in the file. In the portal, set the old hosts to drain mode (*Host pool → Session hosts → Turn off new sessions*). Once they're empty, delete them (VM, NIC and disk are removed together). Users never sit on a host that's mid-change. |
+| **Remove hosts** | Drain mode first. When the host has no sessions, delete the VM in the portal and remove the session host from the host pool. Numbers aren't reused unless you set `sessionHostStartIndex` yourself. |
+
+### Adding FSLogix profiles after the first deployment
+
+1. **Turn it on in the parameter file:**
+   ```bicep
+   param deployFslogixStorage = true
+   param privateDnsZoneMode = 'new'   // or 'existing' + existingFilePrivateDnsZoneId, or 'policyManaged'
+   param resourceGroups = {
+     ...
+     storage: { name: '', create: true }
+   }
+   ```
+   You can also re-run the questionnaire with `-AnswersFile` and answer *yes* to FSLogix.
+2. **Create the storage without touching hosts:**
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -InfraOnly -WhatIf
+   ```
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -InfraOnly
+   ```
+   This saves the new share path into `prod.outputs.json`.
+3. **Do the storage post-deployment steps** (below): admin consent, Conditional Access exclusion, NTFS permissions. Check from one host that `\\<storage>.file.core.windows.net\profiles` resolves to the private IP and opens.
+4. **Push the FSLogix settings to the existing hosts:**
+   ```powershell
+   .\scripts\Update-SessionHostConfig.ps1 -ParameterFile .\infra\params\prod.bicepparam -IncludeStopped
+   ```
+   Hosts are Entra-joined with no Intune or Group Policy, so this script delivers the settings. It runs the same `Configure-SessionHost` run command the template uses on every host. `-IncludeStopped` starts hosts autoscale has switched off, because a stopped host can't receive the settings. Autoscale powers them down again later.
+
+Hosts added later get FSLogix automatically during deployment.
+
+> **Users' existing local profiles are not migrated.** On their next sign-in after step 4, each user gets a new, empty FSLogix profile, and the old local copy on that host is removed (`DeleteLocalProfileWhenVHDShouldApply`). On pooled hosts users usually expect this, but warn them. Run step 4 out of hours, because settings apply at the next sign-in and existing sessions are unaffected.
 
 ## Firewall rules
 

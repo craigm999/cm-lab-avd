@@ -3,9 +3,11 @@
 // Extension order:
 //   1. AADLoginForWindows  - joins the VM to Microsoft Entra ID. No `mdmId` setting is
 //                            passed, so the device is NOT enrolled in Intune.
-//   2. DSC (AVD agent)     - installs the AVD agent + boot loader and registers the VM
+//   2. Run command         - FSLogix + Entra Kerberos configuration. Runs BEFORE the
+//                            agent registers, so no user can land on a half-configured
+//                            host and autoscale can't stop it mid-build.
+//   3. DSC (AVD agent)     - installs the AVD agent + boot loader and registers the VM
 //                            to the host pool with aadJoin = true.
-//   3. Run command         - FSLogix + Entra Kerberos configuration.
 param location string
 param vmName string
 param vmSize string
@@ -155,7 +157,39 @@ resource guestAttestation 'Microsoft.Compute/virtualMachines/extensions@2024-07-
   ]
 }
 
-// 2. AVD agent install + host pool registration.
+// 2. FSLogix + Entra Kerberos session host configuration.
+resource configure 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = {
+  parent: vm
+  name: 'Configure-SessionHost'
+  location: location
+  properties: {
+    source: {
+      script: loadTextContent('../scripts/Configure-SessionHost.ps1')
+    }
+    parameters: [
+      {
+        name: 'FslogixEnabled'
+        value: string(fslogixEnabled)
+      }
+      {
+        name: 'VhdLocation'
+        value: fslogixVhdLocation
+      }
+      {
+        name: 'ProfileSizeMB'
+        value: string(fslogixProfileSizeMB)
+      }
+    ]
+    asyncExecution: false
+    treatFailureAsDeploymentFailure: true
+    timeoutInSeconds: 1800
+  }
+  dependsOn: [
+    guestAttestation
+  ]
+}
+
+// 3. AVD agent install + host pool registration.
 resource avdAgent 'Microsoft.Compute/virtualMachines/extensions@2024-07-01' = {
   parent: vm
   name: 'Microsoft.PowerShell.DSC'
@@ -188,39 +222,7 @@ resource avdAgent 'Microsoft.Compute/virtualMachines/extensions@2024-07-01' = {
     }
   }
   dependsOn: [
-    guestAttestation
-  ]
-}
-
-// 3. FSLogix + Entra Kerberos session host configuration.
-resource configure 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = {
-  parent: vm
-  name: 'Configure-SessionHost'
-  location: location
-  properties: {
-    source: {
-      script: loadTextContent('../scripts/Configure-SessionHost.ps1')
-    }
-    parameters: [
-      {
-        name: 'FslogixEnabled'
-        value: string(fslogixEnabled)
-      }
-      {
-        name: 'VhdLocation'
-        value: fslogixVhdLocation
-      }
-      {
-        name: 'ProfileSizeMB'
-        value: string(fslogixProfileSizeMB)
-      }
-    ]
-    asyncExecution: false
-    treatFailureAsDeploymentFailure: true
-    timeoutInSeconds: 1800
-  }
-  dependsOn: [
-    avdAgent
+    configure
   ]
 }
 
