@@ -248,6 +248,30 @@ Hosts added later get FSLogix automatically during deployment.
 
 > **Users' existing local profiles are not migrated.** On their next sign-in after step 4, each user gets a new, empty FSLogix profile, and the old local copy on that host is removed (`DeleteLocalProfileWhenVHDShouldApply`). On pooled hosts users usually expect this, but warn them. Run step 4 out of hours, because settings apply at the next sign-in and existing sessions are unaffected.
 
+## If a deployment fails
+
+**Fix the cause and re-run the same command. You don't need to start over.** Deployments are idempotent: anything that already succeeded is left as it is, and the run continues from where it stopped. `Deploy-Avd.ps1 -WhatIf` shows what's left to do.
+
+To see why a run failed, find the deployment in the portal (*Subscription → Deployments*), or run:
+
+```powershell
+az deployment sub show --name <deployment name> --query properties.error
+```
+
+Common causes:
+
+| Error | Cause | Fix |
+|---|---|---|
+| *"A virtual network cannot be linked to multiple zones with overlapping namespaces… privatelink.file.core.windows.net"* | The VNet is already linked to a `privatelink.file` zone: a central or hub zone, or a leftover from an earlier attempt that used a different storage resource group. `privateDnsZoneMode = 'new'` tries to link a second one. | Use the zone that's already linked: `privateDnsZoneMode = 'existing'` and `existingFilePrivateDnsZoneId = '<that zone's ID>'`. `Deploy-Avd.ps1` now checks for this before deploying and prints the ID. If the zone is a leftover from your own earlier attempt, you can delete its VNet link instead. |
+| Quota / `OperationNotAllowed` on VMs | vCPU quota | Request more quota for the VM family and region, then re-run with `-AddHosts` for the missing hosts. |
+| `AADLoginForWindows` exit code `-2145648607` | The host can't reach `enterpriseregistration.windows.net` | Firewall: see [`docs/firewall-rules.md`](docs/firewall-rules.md) |
+| Extension error on a host that autoscale stopped | A re-run touched an existing, deallocated host | Use `-AddHosts` or `-InfraOnly` |
+
+**Start over only if you want to change names** (prefix, environment, resource group names), because names can't be changed in place. In that case:
+- Delete only the resource groups the deployment **created** (`create: true`), never your existing network or DNS groups.
+- Delete stale device objects for the old hosts in **Entra ID → Devices**. A rebuilt `avdsh-001` creates a new device object, and the old one stays behind.
+- If you renamed resource groups between attempts, resources from the first attempt are still in the old groups. That's the usual cause of the DNS error above.
+
 ## Firewall rules
 
 No inbound rules are needed. If outbound traffic goes through a firewall (hub firewall mode, or an existing VNet behind one), allow the endpoints in [`docs/firewall-rules.md`](docs/firewall-rules.md) before the pilot. If the Entra join and agent endpoints are blocked, the host deployment fails.

@@ -227,6 +227,10 @@ $global:PasswordSeenByAz = $null
 $global:DeployParamText = $null
 $global:MockVmNames = '[]'
 $global:MockVmPower = '[]'
+$global:MockGraph = $false
+$global:MockDnsLinks = '[]'
+$global:MockZoneList = '[]'
+$global:MockZoneLinks = '[]'
 function global:az {
     $line = ($args | ForEach-Object { "$_" }) -join ' '
     $global:AzCalls.Add($line)
@@ -240,6 +244,10 @@ function global:az {
         'vm list --resource-group * --show-details*' { return $global:MockVmPower }
         'vm list --resource-group *' { return $global:MockVmNames }
         'vm run-command show*' { return 'Succeeded' }
+        'extension show --name resource-graph*' { if ($global:MockGraph) { return '{}' } else { $global:LASTEXITCODE = 1; return '' } }
+        'graph query*' { return $global:MockDnsLinks }
+        'network private-dns zone list*' { return $global:MockZoneList }
+        'network private-dns link vnet list*' { return $global:MockZoneLinks }
         'account show --query*' { return '{"name":"Test Sub","id":"00000000-0000-0000-0000-000000000000"}' }
         'account show*'         { return '{}' }
         'bicep version*'        { return 'Bicep CLI version 0.49.2' }
@@ -309,6 +317,43 @@ try {
 }
 catch { $failures.Add("Deploy-Avd overlap run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 Remove-Item $outputsPath -ErrorAction SilentlyContinue
+
+# Private DNS pre-flight: privateDnsZoneMode = 'new' on a VNet already linked to another privatelink.file zone
+Write-Host "`n== Deploy-Avd.ps1 private DNS pre-flight (az mocked)" -ForegroundColor Cyan
+$global:MockVmNames = '[]'
+$dnsParams = Join-Path $repo 'infra/params/cidns.bicepparam'
+$null = New-Item -ItemType Directory -Force -Path (Split-Path $dnsParams)
+$dnsText = (Get-Content -Raw $exampleParams) -replace "using 'main.bicep'", "using '../main.bicep'" -replace "(?m)^param privateDnsZoneMode = .*$", "param privateDnsZoneMode = 'new'"
+[IO.File]::WriteAllText($dnsParams, $dnsText)
+$hubZone = '/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/rg-dns/providers/Microsoft.Network/privateDnsZones/privatelink.file.core.windows.net'
+$ownZone = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-avd-prod-uksouth-storage/providers/Microsoft.Network/privateDnsZones/privatelink.file.core.windows.net'
+$spokeVnet = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-spoke-avd'
+
+# 1. Resource Graph finds the hub zone linked to the VNet -> stop before deploying
+$global:MockGraph = $true
+$global:MockDnsLinks = '["' + $hubZone + '/virtualNetworkLinks/spoke-link"]'
+$global:AzCalls.Clear(); $global:HostBuffer.Clear()
+$threw = $null
+try { & $deployScript -ParameterFile $dnsParams -WhatIf } catch { $threw = "$_" }
+Assert-Equal ($threw -match 'Private DNS zone conflict') $true 'dns pre-flight: conflict stops the run'
+Assert-Equal ((($global:HostBuffer) -join "`n").Contains("existingFilePrivateDnsZoneId = '$hubZone'")) $true 'dns pre-flight: suggests the existing zone ID'
+Assert-Equal (($global:AzCalls -join "`n") -match 'deployment sub') $false 'dns pre-flight: nothing deployed'
+
+# 2. Only our own zone is linked (re-run of the same deployment) -> no conflict
+$global:MockDnsLinks = '["' + $ownZone + '/virtualNetworkLinks/link-avd-vnet"]'
+$threw = $null
+try { & $deployScript -ParameterFile $dnsParams -WhatIf } catch { $threw = "$_" }
+Assert-Equal ([bool]$threw) $false 'dns pre-flight: own zone from an earlier run is fine'
+
+# 3. No resource-graph extension -> falls back to searching this subscription
+$global:MockGraph = $false
+$global:MockZoneList = '[{"rg":"rg-dns-local","name":"privatelink.file.core.windows.net"}]'
+$global:MockZoneLinks = '[{"id":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-dns-local/providers/Microsoft.Network/privateDnsZones/privatelink.file.core.windows.net/virtualNetworkLinks/x","vnet":"' + $spokeVnet + '"}]'
+$threw = $null
+try { & $deployScript -ParameterFile $dnsParams -WhatIf } catch { $threw = "$_" }
+Assert-Equal ($threw -match 'Private DNS zone conflict') $true 'dns pre-flight (no resource-graph): conflict found in subscription'
+Remove-Item $dnsParams -ErrorAction SilentlyContinue
+$global:MockGraph = $false; $global:MockDnsLinks = '[]'; $global:MockZoneList = '[]'; $global:MockZoneLinks = '[]'
 
 # Update-SessionHostConfig: one running, one deallocated host
 Write-Host "`n== Update-SessionHostConfig.ps1 (az mocked)" -ForegroundColor Cyan

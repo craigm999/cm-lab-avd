@@ -203,6 +203,77 @@ if ($overlap.Count) {
     }
 }
 
+# ------------------------------------------------------------------ Private DNS pre-flight
+# A VNet can be linked to only ONE privatelink.file.* zone. With privateDnsZoneMode = 'new' the
+# template creates a zone in the storage RG and links it, which fails ("overlapping namespaces")
+# if the VNet is already linked to another privatelink.file zone - e.g. a central/hub zone, or a
+# leftover from an earlier attempt that used a different storage RG. Catch that before deploying.
+$dnsMode = Get-ParamValue $paramText 'privateDnsZoneMode' 'new'
+$fslogixOn = (Get-ParamValue $paramText 'deployFslogixStorage' 'true') -ne 'false'
+if ($fslogixOn -and $dnsMode -eq 'new') {
+    $workload = Get-ParamValue $paramText 'workloadName' 'avd'
+    $envName = Get-ParamValue $paramText 'environmentName' 'prod'
+    $suffix = "$workload-$envName-$Location"
+    $subId = $account.id
+    $vnetId = $null
+    if ((Get-ParamValue $paramText 'networkMode' 'new') -eq 'existing') {
+        $subnetId = Get-ParamValue $paramText 'existingSessionHostSubnetId' ''
+        $ix = $subnetId.ToLowerInvariant().IndexOf('/subnets/')
+        if ($ix -gt 0) { $vnetId = $subnetId.Substring(0, $ix) }
+    }
+    else {
+        $netRg = if ($paramText -match "(?s)network:\s*\{\s*name:\s*'([^']+)'") { $Matches[1] } else { "rg-$suffix-network" }
+        $vnetName = Get-ParamValue $paramText 'vnetName' ''
+        if (-not $vnetName) { $vnetName = "vnet-$suffix" }
+        $vnetId = "/subscriptions/$subId/resourceGroups/$netRg/providers/Microsoft.Network/virtualNetworks/$vnetName"
+    }
+    $storageRg = if ($paramText -match "(?s)storage:\s*\{\s*name:\s*'([^']+)'") { $Matches[1] } else { "rg-$suffix-storage" }
+    $ourZone = "/subscriptions/$subId/resourceGroups/$storageRg/providers/Microsoft.Network/privateDnsZones/privatelink.file.core.windows.net".ToLowerInvariant()
+
+    if ($vnetId) {
+        Write-Step 'Checking private DNS zone links on the VNet'
+        $linkIds = @()
+        if ((Test-Az extension show --name resource-graph --only-show-errors).Ok) {
+            $kql = "resources | where type =~ 'microsoft.network/privatednszones/virtualnetworklinks' | where id contains '/privatednszones/privatelink.file.' | where tolower(tostring(properties.virtualNetwork.id)) == '$($vnetId.ToLowerInvariant())' | project id"
+            $g = Test-Az graph query -q $kql --first 100 --query 'data[].id' -o json --only-show-errors
+            if ($g.Ok -and $g.Output) { $parsedIds = $g.Output | ConvertFrom-Json; $linkIds = @(foreach ($x in $parsedIds) { "$x" }) }
+        }
+        else {
+            # Without the resource-graph extension only this subscription can be searched.
+            $z = Test-Az network private-dns zone list --query "[?starts_with(name, 'privatelink.file.')].{rg:resourceGroup, name:name}" -o json --only-show-errors
+            if ($z.Ok -and $z.Output) {
+                $zones = $z.Output | ConvertFrom-Json
+                foreach ($zone in $zones) {
+                    $l = Test-Az network private-dns link vnet list --resource-group $zone.rg --zone-name $zone.name --query '[].{id:id, vnet:virtualNetwork.id}' -o json --only-show-errors
+                    if ($l.Ok -and $l.Output) {
+                        $links = $l.Output | ConvertFrom-Json
+                        foreach ($link in $links) { if ("$($link.vnet)" -ieq $vnetId) { $linkIds += "$($link.id)" } }
+                    }
+                }
+            }
+        }
+        $conflicts = @(foreach ($id in $linkIds) {
+            $zoneId = $id.Substring(0, $id.ToLowerInvariant().IndexOf('/virtualnetworklinks/'))
+            if ($zoneId.ToLowerInvariant() -ne $ourZone) { $zoneId }
+        }) | Select-Object -Unique
+        $conflicts = @($conflicts)
+        if ($conflicts.Count) {
+            Write-Host ''
+            Write-Host 'The VNet is already linked to a privatelink.file DNS zone:' -ForegroundColor Red
+            foreach ($c in $conflicts) { Write-Host "  $c" -ForegroundColor Red }
+            Write-Host ''
+            Write-Host "privateDnsZoneMode = 'new' would create a second zone and Azure would reject the link" -ForegroundColor Yellow
+            Write-Host '("overlapping namespaces"). Use the existing zone instead - set in the parameter file:' -ForegroundColor Yellow
+            Write-Host "  param privateDnsZoneMode = 'existing'"
+            Write-Host "  param existingFilePrivateDnsZoneId = '$($conflicts[0])'"
+            Write-Host 'If that zone is a leftover from an earlier attempt, you can instead delete its VNet link.' -ForegroundColor Yellow
+            if ($tempParamFile) { Remove-Item -LiteralPath $tempParamFile -ErrorAction SilentlyContinue }
+            throw 'Private DNS zone conflict - see above. Nothing was deployed.'
+        }
+        Write-Host '  ok - no conflicting privatelink.file zone linked'
+    }
+}
+
 # ------------------------------------------------------------------ Password
 $setPassword = $false
 if (-not $env:AVD_LOCAL_ADMIN_PASSWORD) {
