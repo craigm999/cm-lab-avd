@@ -181,6 +181,10 @@ To keep going in batches, set the start index to the number of hosts already dep
 
 Each run refreshes the host pool registration token (valid for 8 hours by default).
 
+## Firewall rules
+
+No inbound rules are needed. If outbound traffic goes through a firewall (hub firewall mode, or an existing VNet behind one), allow the endpoints in [`docs/firewall-rules.md`](docs/firewall-rules.md) before the pilot. If the Entra join and agent endpoints are blocked, the host deployment fails.
+
 ## Post-deployment steps (required)
 
 These steps can't be fully expressed in ARM/Bicep:

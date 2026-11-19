@@ -73,25 +73,30 @@ Leave the name blank to use the default convention, `rg-<workload>-<env>-<region
 | 4B.8 | Peer to a hub VNet? Give the hub VNet resource ID | | `hubVnetId`. The deploying identity needs Network Contributor on the hub VNet. |
 | 4B.9 | Use the hub's VPN/ExpressRoute gateway? | Yes / No | `hubUseRemoteGateways` |
 
-### 4.6 Outbound access required by the session hosts
+### 4.6 Firewall rules
 
-If outbound traffic goes through a firewall, allow at least these:
+No **inbound** rules are needed: AVD uses reverse connect. If outbound traffic goes through a firewall or proxy, the full list is in [`firewall-rules.md`](firewall-rules.md). These are the items most often missed:
 
-- Service tags: `WindowsVirtualDesktop`, `AzureMonitor`, `AzureFrontDoor.Frontend`, `AzureActiveDirectory`.
-- FQDNs:
+- **TCP 443:**
   - `*.wvd.microsoft.com`
+  - `*.windows.cloud.microsoft`
   - `login.microsoftonline.com`
   - `enterpriseregistration.windows.net`
   - `pas.windows.net`
-  - `*.prod.warm.ingest.monitor.core.windows.net`
-  - `catalogartifact.azureedge.net`
-  - `gcs.prod.monitoring.core.windows.net`
-  - `mrsglobalsteus2prod.blob.core.windows.net`
   - `wvdportalstorageblob.blob.core.windows.net`
-  - `azkms.core.windows.net:1688`
-  - `kms.core.windows.net:1688`
-  - Windows Update and Microsoft 365 endpoints
-- Full list: Microsoft Learn, *"Required FQDNs and endpoints for Azure Virtual Desktop"*.
+  - `mrsglobalsteus2prod.blob.core.windows.net`
+- **TCP 80**, for certificate checks: `oneocsp.microsoft.com`, `www.microsoft.com`, `ctldl.windowsupdate.com`, `*.microsoftaik.azure.net`
+- **TCP 1688:** `azkms.core.windows.net`
+- **UDP 3478:** `51.5.0.0/16` (RDP Shortpath, recommended)
+- **TCP 445** from the session host subnet to the storage private endpoint
+- **No TLS inspection** on AVD or Entra traffic
+
+| # | Question | Answer |
+|---|---|---|
+| 4.6.1 | Firewall product and who manages the rules | |
+| 4.6.2 | Is TLS inspection in use? Can AVD and Entra traffic be excluded? | |
+| 4.6.3 | Is UDP 3478 to `51.5.0.0/16` allowed (RDP Shortpath)? | |
+| 4.6.4 | Do user devices go through a proxy? Are the client endpoints allowed? | |
 
 ## 5. Identity and access
 
