@@ -151,15 +151,33 @@ The questionnaire looks up the object ID of the **Azure Virtual Desktop** servic
 
 Session hosts deploy 20 at a time. A full 100-host deployment takes roughly 45–90 minutes.
 
-### Staged rollout or scaling out later
+### Pilot with one host, then add the rest
 
-Deploy a pilot first, then the remaining hosts:
+1. **Pilot run.** Answer `1` to the questionnaire's *"Hosts to deploy in the first run"*, or set these values in the parameter file:
+   ```bicep
+   param sessionHostCountOverride = 1
+   param sessionHostStartIndex = 0
+   ```
+   This deploys everything except the other 99 hosts: host pool, app group, workspace, scaling plan, storage, network, RBAC and `avdsh-001`. You can test sign-in, SSO, FSLogix profiles and outbound access end to end. The pilot needs only 8 vCPU of quota.
 
-The questionnaire asks for a pilot size. To deploy the remaining hosts later:
+2. **Keep the pilot host on while testing.** Autoscale can power off a single host outside business hours. Tag the VM `ExcludeFromScaling` (the plan's exclusion tag), or set `deployScalingPlan = false` for the pilot run. Start VM on Connect wakes a stopped host when someone signs in either way.
 
-```bash
-./scripts/deploy.sh infra/params/prod.bicepparam create -p sessionHostStartIndex=20 sessionHostCountOverride=80
-```
+3. **Add the remaining hosts.** Edit the same parameter file and run it again:
+   ```bicep
+   param sessionHostCountOverride = 99
+   param sessionHostStartIndex = 1
+   ```
+   ```bash
+   ./scripts/deploy.sh infra/params/prod.bicepparam what-if
+   ```
+   ```bash
+   ./scripts/deploy.sh infra/params/prod.bicepparam
+   ```
+   This creates `avdsh-002` to `avdsh-100` and leaves `avdsh-001` untouched. Zone placement continues round-robin, so the final spread is still 34/33/33. The shared resources are redeployed with the same values, so nothing changes on them. Raise the vCPU quota to 800 before this run.
+
+To keep going in batches, set the start index to the number of hosts already deployed. For example, use `sessionHostStartIndex = 21` with `sessionHostCountOverride = 79` after hosts 001–021.
+
+> Don't put `sessionHostStartIndex` back to `0` with the full count after the pilot. That redeploys the pilot host's extensions with a new registration token. It's harmless but unnecessary.
 
 Each run refreshes the host pool registration token (valid for 8 hours by default).
 

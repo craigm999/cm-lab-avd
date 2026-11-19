@@ -8,7 +8,6 @@
 # Examples:
 #   ./scripts/deploy.sh infra/params/prod.bicepparam what-if
 #   ./scripts/deploy.sh infra/params/prod.bicepparam
-#   ./scripts/deploy.sh infra/params/prod.bicepparam create -p sessionHostStartIndex=20 sessionHostCountOverride=80
 #
 # The target subscription is read from the "// subscriptionId: <id>" header that
 # scripts/New-AvdParameterFile.ps1 writes, or from $AVD_SUBSCRIPTION_ID.

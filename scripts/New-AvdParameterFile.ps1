@@ -797,6 +797,9 @@ Write-Host "    1. export AVD_LOCAL_ADMIN_PASSWORD='<strong password>'   (PowerS
 Write-Host "    2. ./scripts/deploy.sh infra/params/$environmentName.bicepparam what-if"
 Write-Host "    3. ./scripts/deploy.sh infra/params/$environmentName.bicepparam"
 if ($pilot -lt $hostsNeeded) {
-    Write-Host "    4. Later, deploy the remaining $($hostsNeeded - $pilot) hosts with:"
-    Write-Host "         ... -p sessionHostStartIndex=$pilot sessionHostCountOverride=$($hostsNeeded - $pilot)"
+    Write-Host "    4. Later, to add the remaining $($hostsNeeded - $pilot) hosts, edit $environmentName.bicepparam:"
+    Write-Host "         param sessionHostStartIndex = $pilot"
+    Write-Host "         param sessionHostCountOverride = $($hostsNeeded - $pilot)"
+    Write-Host '       then run deploy.sh again (what-if first).'
+    if ($deployScalingPlan) { Write-Host "    Tip: tag pilot hosts 'ExcludeFromScaling' so autoscale doesn't power them off while you test." }
 }
