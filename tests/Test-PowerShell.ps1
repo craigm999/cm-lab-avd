@@ -241,6 +241,10 @@ function global:az {
         $i = [array]::IndexOf([string[]]$args, '--parameters')
         if ($i -ge 0) { $global:DeployParamText = Get-Content -Raw -LiteralPath $args[$i + 1] }
     }
+    if ($line -like 'rest --method patch*') {
+        $bi = [array]::IndexOf([string[]]$args, '--body')
+        if ($bi -ge 0) { $global:PatchBody = Get-Content -Raw -LiteralPath ("$($args[$bi + 1])".TrimStart('@')) }
+    }
     if ($global:AzResponses) {
         foreach ($k in $global:AzResponses.Keys) {
             if ($line -like $k) {
@@ -444,6 +448,85 @@ try {
 }
 catch { $failures.Add("Test-AvdUserAccess (guest) threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 $global:AzResponses = $null
+
+# Set-FslogixStorageAuth: adds privatelink identifierUris + cloud-group tag, consents, reports MFA policy
+Write-Host "`n== Set-FslogixStorageAuth.ps1 (az mocked)" -ForegroundColor Cyan
+$authScript = Join-Path $repo 'scripts/Set-FslogixStorageAuth.ps1'
+$caPolicies = '[{"name":"Require MFA all users","include":["All"],"exclude":[],"controls":["mfa"],"strength":null},{"name":"Already excluded","include":["All"],"exclude":["app-1"],"controls":["mfa"],"strength":null}]'
+$global:AzResponses = [ordered]@{
+    'account show --query tenantId*' = 'tenant-1'
+    'ad app list --filter*' = '[{"id":"obj-1","appId":"app-1","uris":["api://tenant-1/CIFS/sa1.file.core.windows.net","api://tenant-1/HOST/sa1.file.core.windows.net","CIFS/sa1.file.core.windows.net"],"tags":[]}]'
+    'rest --method patch*' = ''
+    'ad app permission admin-consent*' = ''
+    'rest --method get --url https://graph.microsoft.com/v1.0/identity/conditionalAccess*' = $caPolicies
+}
+$global:AzCalls.Clear(); $global:HostBuffer.Clear(); $global:PatchBody = $null
+try {
+    & $authScript -StorageAccountName 'sa1'
+    $calls = $global:AzCalls -join "`n"
+    $body = "$global:PatchBody"
+    Assert-Equal ($body.Contains('api://tenant-1/CIFS/sa1.privatelink.file.core.windows.net')) $true 'storage auth: privatelink api:// URI added'
+    Assert-Equal ($body.Contains('"CIFS/sa1.privatelink.file.core.windows.net"')) $true 'storage auth: privatelink SPN-form URI added'
+    Assert-Equal ($body.Contains('api://tenant-1/CIFS/sa1.file.core.windows.net')) $true 'storage auth: existing URIs kept'
+    Assert-Equal ($body.Contains('kdc_enable_cloud_group_sids')) $true 'storage auth: cloud-only groups tag added'
+    Assert-Equal ($calls -match 'ad app permission admin-consent --id app-1') $true 'storage auth: admin consent granted'
+    $out = ($global:HostBuffer) -join "`n"
+    Assert-Equal ($out -match 'Require MFA all users') $true 'storage auth: blocking MFA policy reported'
+    Assert-Equal ($out -match 'Already excluded') $false 'storage auth: excluded policy not reported'
+}
+catch { $failures.Add("Set-FslogixStorageAuth threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
+# already configured -> no PATCH; -WhatIf -> no consent either
+$global:AzResponses['ad app list --filter*'] = '[{"id":"obj-1","appId":"app-1","uris":["CIFS/sa1.file.core.windows.net","CIFS/sa1.privatelink.file.core.windows.net"],"tags":["kdc_enable_cloud_group_sids"]}]'
+$global:AzCalls.Clear()
+try {
+    & $authScript -StorageAccountName 'sa1' -WhatIf
+    $calls = $global:AzCalls -join "`n"
+    Assert-Equal ($calls -match 'rest --method patch') $false 'storage auth: nothing to patch when already configured'
+    Assert-Equal ($calls -match 'admin-consent') $false 'storage auth: -WhatIf makes no changes'
+}
+catch { $failures.Add("Set-FslogixStorageAuth -WhatIf threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
+# Get-FslogixHostDiagnostics: pushes the host script and colours the report
+Write-Host "`n== Get-FslogixHostDiagnostics.ps1 (az mocked)" -ForegroundColor Cyan
+$diagScript = Join-Path $repo 'scripts/Get-FslogixHostDiagnostics.ps1'
+$global:AzResponses = [ordered]@{
+    'vm run-command invoke*' = "Enable succeeded:`n[stdout]`n[OK] TCP 445 reachable`n[FAIL] sa1.file.core.windows.net -> 20.1.2.3 is PUBLIC`n[HINT] (1326) Bad credentials"
+}
+$global:AzCalls.Clear(); $global:HostBuffer.Clear()
+try {
+    & $diagScript -VmName 'avdsh-001' -ResourceGroup 'rg-hosts'
+    Assert-Equal (($global:AzCalls -join "`n") -match 'vm run-command invoke --resource-group rg-hosts --name avdsh-001 --command-id RunPowerShellScript --scripts @\S+Test-FslogixHost\.ps1') $true 'diagnostics: host script pushed via Run Command'
+    $out = ($global:HostBuffer) -join "`n"
+    Assert-Equal ($out -match '\[FAIL\] sa1\.file\.core\.windows\.net -> 20\.1\.2\.3 is PUBLIC') $true 'diagnostics: report shown'
+    Assert-Equal ($out -match '\[stdout\]') $false 'diagnostics: Run Command noise stripped'
+}
+catch { $failures.Add("Get-FslogixHostDiagnostics threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+$global:AzResponses = $null
+
+# Test-FslogixHost (runs on the session host): real run on Windows with a planted FSLogix log
+if ($env:OS -eq 'Windows_NT') {
+    Write-Host "`n== Test-FslogixHost.ps1 (Windows, fake FSLogix log)" -ForegroundColor Cyan
+    $logDir = 'C:\ProgramData\FSLogix\Logs\Profile'
+    $created = -not (Test-Path $logDir)
+    $null = New-Item -ItemType Directory -Force -Path $logDir
+    $fakeLog = Join-Path $logDir 'Profile-ci-test.log'
+    Set-Content -Path $fakeLog -Value @(
+        '[10:00:00.001][tid:00000a1c.00000b2d][INFO]           Starting LoadProfile'
+        '[10:00:01.002][tid:00000a1c.00000b2d][ERROR:0000052E] Failed to open virtual disk (The user name or password is incorrect.)'
+    )
+    try {
+        $hostOut = (& (Join-Path $repo 'infra/scripts/Test-FslogixHost.ps1') 2>&1 | Out-String)
+        Microsoft.PowerShell.Utility\Write-Host $hostOut
+        Assert-Equal ($hostOut -match '\[HINT\] \(1326\) Bad credentials') $true 'host diag: FSLogix hex code 0000052E decoded to 1326 with hint'
+        Assert-Equal ($hostOut -match '\[(OK|FAIL|WARN)\] CloudKerberosTicketRetrievalEnabled') $true 'host diag: registry checks ran'
+    }
+    catch { $failures.Add("Test-FslogixHost threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+    finally {
+        Remove-Item $fakeLog -ErrorAction SilentlyContinue
+        if ($created) { Remove-Item 'C:\ProgramData\FSLogix' -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
 
 Remove-Item Function:\az -ErrorAction SilentlyContinue
 

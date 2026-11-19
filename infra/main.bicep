@@ -234,6 +234,14 @@ param fslogixStorageSku string = 'Premium_ZRS'
 @description('Maximum FSLogix profile VHDX size in MB.')
 param fslogixProfileSizeMB int = 30000
 
+@description('Default share-level permission on the FSLogix share for all authenticated identities (FSLogix guidance: StorageFileDataSmbShareContributor). None = rely only on the users-group RBAC assignment.')
+@allowed([
+  'None'
+  'StorageFileDataSmbShareContributor'
+  'StorageFileDataSmbShareReader'
+])
+param fslogixDefaultSharePermission string = 'StorageFileDataSmbShareContributor'
+
 @description('privatelink.file DNS zone: new = create one and link it to the VNet; existing = use existingFilePrivateDnsZoneId (e.g. in a hub/connectivity subscription); policyManaged = create no DNS records (Azure Policy does it).')
 @allowed([
   'new'
@@ -428,6 +436,7 @@ module fslogixStorage 'modules/storage.bicep' = if (deployFslogixStorage) {
     avdUsersGroupObjectId: avdUsersGroupObjectId
     avdAdminsGroupObjectId: avdAdminsGroupObjectId
     logAnalyticsWorkspaceId: logAnalyticsWorkspaceId
+    defaultSharePermission: fslogixDefaultSharePermission
     tags: allTags
   }
   dependsOn: [

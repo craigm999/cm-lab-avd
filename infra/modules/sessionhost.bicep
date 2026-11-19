@@ -8,6 +8,7 @@
 //                            host and autoscale can't stop it mid-build.
 //   3. DSC (AVD agent)     - installs the AVD agent + boot loader and registers the VM
 //                            to the host pool with aadJoin = true.
+//   4. Restart             - delayed restart so the Entra Kerberos setting takes effect.
 param location string
 param vmName string
 param vmSize string
@@ -223,6 +224,27 @@ resource avdAgent 'Microsoft.Compute/virtualMachines/extensions@2024-07-01' = {
   }
   dependsOn: [
     configure
+  ]
+}
+
+// 4. Restart once the build is complete. The Entra Kerberos setting
+//    (CloudKerberosTicketRetrievalEnabled) only takes effect after a restart, and FSLogix
+//    profiles on Azure Files depend on it. The restart is scheduled 2 minutes out so this
+//    command (and the deployment) completes first.
+resource restartAfterBuild 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = {
+  parent: vm
+  name: 'Restart-AfterBuild'
+  location: location
+  properties: {
+    source: {
+      script: 'shutdown.exe /r /t 120 /d p:4:1 /c "AVD session host build complete"'
+    }
+    asyncExecution: false
+    treatFailureAsDeploymentFailure: false
+    timeoutInSeconds: 300
+  }
+  dependsOn: [
+    avdAgent
   ]
 }
 

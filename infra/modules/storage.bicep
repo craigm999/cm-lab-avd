@@ -16,6 +16,14 @@ param existingFilePrivateDnsZoneId string = ''
 param avdUsersGroupObjectId string
 param avdAdminsGroupObjectId string = ''
 param logAnalyticsWorkspaceId string
+
+@description('Share-level permission for every authenticated identity. FSLogix guidance recommends StorageFileDataSmbShareContributor (NTFS permissions then control per-user access). None = only explicit RBAC assignments.')
+@allowed([
+  'None'
+  'StorageFileDataSmbShareContributor'
+  'StorageFileDataSmbShareReader'
+])
+param defaultSharePermission string = 'StorageFileDataSmbShareContributor'
 param tags object = {}
 
 var storageAccountName = take('stfslogix${uniqueString(resourceGroup().id)}', 24)
@@ -45,6 +53,9 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     }
     azureFilesIdentityBasedAuthentication: {
       directoryServiceOptions: 'AADKERB'
+      // A default share-level permission avoids depending on (cloud-only) group SIDs in the
+      // Kerberos ticket for share access. The explicit group assignments below still apply.
+      defaultSharePermission: defaultSharePermission
     }
   }
 }

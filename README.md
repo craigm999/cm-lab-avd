@@ -88,6 +88,8 @@ scripts/
   Deploy-Avd.ps1             # deploy / -WhatIf / -AddHosts / -InfraOnly (Windows PowerShell)
   Update-SessionHostConfig.ps1  # re-apply FSLogix/Kerberos settings to existing hosts
   Test-AvdUserAccess.ps1     # read-only: why can't this user see / open the desktop?
+  Set-FslogixStorageAuth.ps1 # one-off Entra app setup for FSLogix (privatelink, consent, CA check)
+  Get-FslogixHostDiagnostics.ps1 # read-only: why won't profiles load on this host?
   deploy.sh                  # same, for macOS / Linux
   Enable-EntraSSO.ps1        # one-off tenant config for Entra SSO
 ```
@@ -279,17 +281,57 @@ No inbound rules are needed. If outbound traffic goes through a firewall (hub fi
 
 ## Post-deployment steps (required)
 
-These steps can't be fully expressed in ARM/Bicep:
+These steps can't be expressed in ARM/Bicep. Run them once after the first deployment that includes FSLogix storage. They apply to every host, current and future.
 
-1. **Grant admin consent for the storage account's Entra app.** In Entra ID, open *App registrations → All applications* and find `[Storage Account] <name>.file.core.windows.net`. Under *API permissions*, grant admin consent.
-2. **Exclude that storage app from Conditional Access policies that require MFA.** Otherwise, Kerberos ticket retrieval for the FSLogix share fails.
-3. **Set NTFS permissions on the `profiles` share** for the FSLogix creator/owner pattern. Use an admin who holds *Storage File Data SMB Share Elevated Contributor* (the admins group is granted this). See Microsoft's "Configure FSLogix profile container with Azure Files and Microsoft Entra ID" guidance.
-   - Identity support: Entra Kerberos for Azure Files is generally available for **hybrid** identities (users synced from AD). Support for **cloud-only** users is newer. Check its current status for your tenant before relying on it for FSLogix.
-4. **Enable Entra SSO for the tenant.** This step is **required if any users are guests** (external identities). Members can skip it, but they then get an extra sign-in prompt. Run it as an admin who can manage service principals. Adding a device group of the session hosts also removes the consent prompt:
+1. **Configure the storage account's Entra app.** This is required for profiles to load. Run it as an admin who can manage app registrations:
+   ```powershell
+   .\scripts\Set-FslogixStorageAuth.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
+   ```
+   ```powershell
+   .\scripts\Set-FslogixStorageAuth.ps1 -ParameterFile .\infra\params\prod.bicepparam
+   ```
+   Enabling Entra Kerberos creates an app called `[Storage Account] <name>.file.core.windows.net`. The script configures it to Microsoft's guidance:
+   - **Private link names.** Hosts reach the share through the private endpoint, so DNS returns `<name>.privatelink.file.core.windows.net`. The app needs matching `privatelink` identifier URIs. Without them, Kerberos fails and the mount falls back to NTLM, which gives error **1326**.
+   - **Cloud-only groups.** It adds the `kdc_enable_cloud_group_sids` tag so groups that exist only in Entra ID are included in the Kerberos ticket. This is required for cloud-only identities. Microsoft is moving this to a `kerberosTicket` optional claim (preview). The tag is what the Azure Files and FSLogix guides currently use.
+   - **Admin consent** for the app (`openid`, `profile`, `User.Read`).
+   - **Conditional Access check.** Entra Kerberos doesn't support MFA for the share. The script lists any enabled policy that requires MFA and covers this app. Exclude the app in each one, or mounts fail with error **1327**. The script only reads policies; it doesn't change them.
+2. **Restart the session hosts** that were deployed before this step. New hosts restart automatically at the end of their build, because the Kerberos setting needs a restart.
+3. **Optional: lock down NTFS permissions on the `profiles` share.** By default every authenticated identity has the *Storage File Data SMB Share Contributor* share role (`fslogixDefaultSharePermission`), as FSLogix guidance recommends. Folder permissions then control who sees what. For cloud-only identities, set them in the portal: *Storage account → File shares → profiles → Browse → Manage access*. File Explorer and icacls don't support cloud-only identities. Microsoft's FSLogix recommendation:
+   - **CREATOR OWNER:** Modify, subfolders and files only
+   - **Admins group:** Full control
+   - **Users group:** Modify, this folder only
+4. **Enable Entra SSO for the tenant.** This step is **required if any users are guests**. Members can skip it, but they then get an extra sign-in prompt:
    ```powershell
    ./scripts/Enable-EntraSSO.ps1 -TargetDeviceGroupId <device group id>
    ```
-5. **If `privateDnsZoneMode` is `existing`:** confirm the central zone is linked to the VNet that provides DNS for the session hosts, and that `<storage>.file.core.windows.net` resolves to the private IP from a host.
+5. **Check a host:** run `.\scripts\Get-FslogixHostDiagnostics.ps1 -ParameterFile .\infra\params\prod.bicepparam -VmName avdsh-001`. See *Profiles fail to load at sign-in* below.
+
+### Profiles fail to load at sign-in
+
+Run the host diagnostics. They need no RDP and make no changes:
+
+```powershell
+.\scripts\Get-FslogixHostDiagnostics.ps1 -ParameterFile .\infra\params\prod.bicepparam -VmName avdsh-001
+```
+
+The report shows the registry settings, required services, DNS for the storage account (private or public IP), TCP 445, and the last FSLogix errors decoded with their likely fix:
+
+| Code in FSLogix log | Meaning | Fix |
+|---|---|---|
+| **1326** (`0000052E`) | No Kerberos ticket, so it fell back to NTLM | `Set-FslogixStorageAuth.ps1` (privatelink names, consent), then restart the host |
+| **1327** (`0000052F`) | Account restrictions | An MFA Conditional Access policy covers the storage app. Exclude it. |
+| **5** (`00000005`) | Access denied | Share role / NTFS permissions. For cloud-only users, the groups tag (`Set-FslogixStorageAuth.ps1`). Share-permission changes take up to ~30 min. |
+| **53 / 67** | Network path or name not found | DNS (the account must resolve to the private endpoint IP) or TCP 445 blocked |
+| **1311** | No logon servers | Kerberos ticket retrieval isn't active: check the registry setting and restart |
+
+**DNS:** `<name>.file.core.windows.net` must resolve, via a `privatelink` CNAME, to the private endpoint's IP **from the session host**.
+- With `privateDnsZoneMode = 'new'`, the template links the zone to the VNet.
+- With `'existing'`, the central zone must be linked to the VNet, or to the hub VNet if hosts use a hub DNS server or resolver, and that resolver must forward to Azure DNS.
+- With `'policyManaged'`, check that the policy actually created the A record in the zone.
+
+If DNS returns a public IP, the zone isn't being used. Public network access on the account is disabled, so that fails.
+
+**Guests:** the Azure Files guide supports external users only for FSLogix on AVD. Entra's Kerberos overview says B2B guests can't currently use Entra Kerberos. The two pages conflict, so test a guest before relying on it.
 
 ## Connecting
 

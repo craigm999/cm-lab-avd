@@ -1,0 +1,73 @@
+<#
+    Runs ON a session host (pushed by scripts/Get-FslogixHostDiagnostics.ps1 via Run Command).
+    Read-only. Output is kept short because Run Command returns only ~4 KB.
+#>
+$ErrorActionPreference = 'Continue'
+function Line([string] $State, [string] $Text) { Write-Output ('[{0}] {1}' -f $State, $Text) }
+
+# ---------------------------------------------------------------- Settings
+$kerb = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters' -ErrorAction SilentlyContinue).CloudKerberosTicketRetrievalEnabled
+$cred = (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\AzureADAccount' -ErrorAction SilentlyContinue).LoadCredKeyFromProfile
+$fsl = Get-ItemProperty 'HKLM:\SOFTWARE\FSLogix\Profiles' -ErrorAction SilentlyContinue
+if ($kerb -eq 1) { Line OK 'CloudKerberosTicketRetrievalEnabled = 1' } else { Line FAIL 'CloudKerberosTicketRetrievalEnabled not set - re-run Update-SessionHostConfig.ps1' }
+if ($cred -eq 1) { Line OK 'LoadCredKeyFromProfile = 1' } else { Line WARN 'LoadCredKeyFromProfile not set' }
+if ($fsl -and $fsl.Enabled -eq 1) { Line OK ('FSLogix enabled, VHDLocations = ' + (@($fsl.VHDLocations) -join ';')) } else { Line FAIL 'FSLogix not enabled in registry' }
+$boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+Line INFO ('Last boot: {0:yyyy-MM-dd HH:mm} - Kerberos setting needs a restart after it is first applied' -f $boot)
+
+foreach ($svc in 'iphlpsvc', 'WinHttpAutoProxySvc') {
+    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if (-not $s) { Line WARN "$svc not found" }
+    elseif ($s.StartType -eq 'Disabled') { Line FAIL "$svc is Disabled (required by Entra Kerberos)" }
+    else { Line OK "$svc $($s.Status) ($($s.StartType))" }
+}
+$join = (dsregcmd /status) -match 'AzureAdJoined\s*:\s*YES'
+if ($join) { Line OK 'Device is Entra joined' } else { Line FAIL 'Device is NOT Entra joined (dsregcmd /status)' }
+
+# ---------------------------------------------------------------- DNS + network
+$unc = @($fsl.VHDLocations)[0]
+if ($unc -match '^\\\\([^\\]+)\\') {
+    $fqdn = $Matches[1]
+    try {
+        $res = Resolve-DnsName -Name $fqdn -ErrorAction Stop
+        $cnames = @($res | Where-Object { $_.Type -eq 'CNAME' } | ForEach-Object { $_.NameHost })
+        $ips = @($res | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+        $private = @($ips | Where-Object { $_ -match '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)' })
+        if ($private.Count) { Line OK "$fqdn -> $($ips -join ',') (private endpoint)" }
+        else { Line FAIL "$fqdn -> $($ips -join ',') is PUBLIC - private DNS zone not linked/used by this VNet's DNS" }
+        if (-not ($cnames -match 'privatelink')) { Line WARN 'No privatelink CNAME in the answer' }
+    }
+    catch { Line FAIL "DNS lookup of $fqdn failed: $($_.Exception.Message)" }
+    $tcp = Test-NetConnection -ComputerName $fqdn -Port 445 -InformationLevel Quiet -WarningAction SilentlyContinue
+    if ($tcp) { Line OK 'TCP 445 reachable' } else { Line FAIL 'TCP 445 NOT reachable - NSG/firewall between hosts and the private endpoint' }
+}
+
+# ---------------------------------------------------------------- FSLogix log
+$hints = @{
+    '5'    = 'Access denied: share-level role, NTFS permissions, or cloud-only groups tag (Set-FslogixStorageAuth.ps1)'
+    '53'   = 'Network path not found: DNS or port 445'
+    '67'   = 'Network name not found: share name / DNS'
+    '86'   = 'Invalid password: no Kerberos ticket - admin consent / privatelink names (Set-FslogixStorageAuth.ps1), restart'
+    '1326' = 'Bad credentials: Kerberos fell back to NTLM - privatelink identifierUris missing (Set-FslogixStorageAuth.ps1), admin consent, or host not restarted'
+    '1327' = 'Account restrictions: an MFA Conditional Access policy applies to the storage app - exclude it'
+    '1311' = 'No logon servers: Entra Kerberos ticket retrieval not working - check the registry setting and restart'
+}
+$logDir = 'C:\ProgramData\FSLogix\Logs\Profile'
+$log = Get-ChildItem -Path $logDir -Filter '*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+if (-not $log) { Line INFO 'No FSLogix profile log yet (nobody has signed in)' }
+else {
+    $errs = @(Select-String -Path $log.FullName -Pattern 'ERROR' -SimpleMatch | Select-Object -Last 6)
+    if (-not $errs.Count) { Line OK "No errors in $($log.Name)" }
+    else {
+        Line INFO "Last errors in $($log.Name):"
+        $codes = @{}
+        foreach ($e in $errs) {
+            $t = $e.Line.Trim(); if ($t.Length -gt 170) { $t = $t.Substring(0, 170) + '...' }
+            Write-Output "  $t"
+            # FSLogix writes codes as 8-digit hex, e.g. [ERROR:0000052E] = 1326.
+            foreach ($m in [regex]::Matches($e.Line, 'ERROR:([0-9A-Fa-f]{8})')) { $codes[[string][Convert]::ToInt32($m.Groups[1].Value, 16)] = $true }
+            foreach ($m in [regex]::Matches($e.Line, '\((\d{1,4})\)')) { $codes[$m.Groups[1].Value] = $true }
+        }
+        foreach ($c in $codes.Keys) { if ($hints.ContainsKey($c)) { Line HINT "($c) $($hints[$c])" } }
+    }
+}
