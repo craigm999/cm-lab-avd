@@ -26,6 +26,8 @@ param avdUsersGroupObjectId string
 param deployScalingPlan bool
 param scalingPlanTimeZone string
 param logAnalyticsWorkspaceId string
+@description('Device redirection settings (true = allowed) - the "redirection" block of infra/customizations/customizations.json. Missing keys default to blocked, except clipboard/audio/microphone/WebAuthn which default to allowed.')
+param redirection object = {}
 param tags object = {}
 
 @description('Do not set - used to calculate the registration token expiry.')
@@ -37,7 +39,37 @@ param baseTime string = utcNow('u')
 var entraRdpProperties = enableSingleSignOn
   ? 'targetisaadjoined:i:1;enablerdsaadauth:i:1;'
   : 'targetisaadjoined:i:1;'
-var baseRdpProperties = 'drivestoredirect:s:;audiomode:i:0;videoplaybackmode:i:1;redirectclipboard:i:1;redirectprinters:i:1;devicestoredirect:s:;redirectcomports:i:0;redirectsmartcards:i:1;usbdevicestoredirect:s:;enablecredsspsupport:i:1;use multimon:i:1;autoreconnection enabled:i:1;bandwidthautodetect:i:1;networkautodetect:i:1;audiocapturemode:i:1;encode redirected video capture:i:1;camerastoredirect:s:*;'
+var baseRdpProperties = 'videoplaybackmode:i:1;enablecredsspsupport:i:1;use multimon:i:1;autoreconnection enabled:i:1;bandwidthautodetect:i:1;networkautodetect:i:1;encode redirected video capture:i:1;'
+
+// Device redirection (Microsoft Learn: Azure Virtual Desktop RDP properties). The same
+// settings are enforced on each host as policy by Customize-SessionHost.ps1; where they
+// differ, the most restrictive wins.
+var allow = {
+  drives: redirection.?drives ?? false
+  printers: redirection.?printers ?? false
+  usbDevices: redirection.?usbDevices ?? false
+  comPorts: redirection.?comPorts ?? false
+  smartCards: redirection.?smartCards ?? false
+  cameras: redirection.?cameras ?? false
+  clipboard: redirection.?clipboard ?? true
+  audioPlayback: redirection.?audioPlayback ?? true
+  microphone: redirection.?microphone ?? true
+  webAuthn: redirection.?webAuthn ?? true
+}
+var redirectionRdpProperties = join([
+  'drivestoredirect:s:${allow.drives ? '*' : ''}'
+  'redirectprinters:i:${allow.printers ? 1 : 0}'
+  'usbdevicestoredirect:s:${allow.usbDevices ? '*' : ''}'
+  'devicestoredirect:s:${allow.usbDevices ? '*' : ''}'
+  'redirectcomports:i:${allow.comPorts ? 1 : 0}'
+  'redirectsmartcards:i:${allow.smartCards ? 1 : 0}'
+  'camerastoredirect:s:${allow.cameras ? '*' : ''}'
+  'redirectclipboard:i:${allow.clipboard ? 1 : 0}'
+  'audiomode:i:${allow.audioPlayback ? 0 : 2}'
+  'audiocapturemode:i:${allow.microphone ? 1 : 0}'
+  'redirectwebauthn:i:${allow.webAuthn ? 1 : 0}'
+  'redirectlocation:i:0'
+], ';')
 
 var isPersonal = hostPoolType == 'Personal'
 // Host pool type can't be changed in place, so personal resources get their own names and
@@ -58,7 +90,7 @@ resource hostPool 'Microsoft.DesktopVirtualization/hostPools@2024-04-03' = {
     preferredAppGroupType: 'Desktop'
     startVMOnConnect: true
     validationEnvironment: false
-    customRdpProperty: '${baseRdpProperties}${entraRdpProperties}'
+    customRdpProperty: '${baseRdpProperties}${redirectionRdpProperties};${entraRdpProperties}'
     registrationInfo: {
       expirationTime: dateTimeAdd(baseTime, registrationTokenValidity)
       registrationTokenOperation: 'Update'

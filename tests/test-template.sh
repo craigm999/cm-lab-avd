@@ -78,6 +78,9 @@ check "Pool automation: Automation account with a managed identity" \
   'any(.[]; .type=="Microsoft.Automation/automationAccounts" and .identity.type=="SystemAssigned")'
 if grep -q "b24988ac-6180-42a0-ab88-20f7382dd24c" "$T" && grep -q "e307426c-f9b6-4e81-87de-d99efb3c32bc" "$T" && grep -q "73c42c96-874c-492b-b04d-ab87d138a893" "$T"; then pass "Pool automation: Contributor (hosts), Host Pool Contributor, Log Analytics Reader roles"; else fail "Pool automation role IDs"; fi
 if jq -e '.outputs.automationConfig and .outputs.automationAccountName' "$T" >/dev/null; then pass "Pool automation: config output for the runbook"; else fail "Pool automation: config output"; fi
+check "Host pool RDP device redirection built from the shared redirection settings" \
+  'any(.[]; .type=="Microsoft.DesktopVirtualization/hostPools" and (.properties|tostring|test("customRdpProperty")))'
+if grep -q "redirectclipboard:i:" "$T" && grep -q "drivestoredirect:s:" "$T" && grep -q "camerastoredirect:s:" "$T" && grep -q "redirectionRdpProperties" "$T"; then pass "RDP redirection properties present"; else fail "RDP redirection properties present"; fi
 check "AVD agent runs after Entra join (dependsOn chain)" \
   'any(.[]; .properties.type?=="DSC" and ((.dependsOn // []) | length) > 0)'
 check "Session host VM has SystemAssigned identity" \

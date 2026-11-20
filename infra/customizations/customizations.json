@@ -26,5 +26,18 @@
     "enabled": true,
     "defenderNetworkProtection": false
   },
+  "redirection": {
+    "_comment": "true = allowed, false = blocked. Applied twice: as host pool RDP properties (Deploy-Avd.ps1) and as policy on each session host (Customize-SessionHost.ps1) - the most restrictive wins.",
+    "drives": false,
+    "printers": false,
+    "usbDevices": false,
+    "comPorts": false,
+    "smartCards": false,
+    "cameras": false,
+    "clipboard": true,
+    "audioPlayback": true,
+    "microphone": true,
+    "webAuthn": true
+  },
   "apps": []
 }

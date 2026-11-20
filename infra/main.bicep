@@ -468,6 +468,7 @@ module hostPool 'modules/hostpool.bicep' = {
     hostPoolName: hostPoolName
     hostPoolType: hostPoolType
     personalAssignmentType: personalAssignmentType
+    redirection: customizationConfig.?redirection ?? {}
     maxSessionsPerHost: maxSessionsPerHost
     loadBalancerType: loadBalancerType
     enableSingleSignOn: enableSingleSignOn

@@ -13,6 +13,8 @@
                  Appx packages removed
       harden   : LLMNR off, AutoRun off, LSA protection, WDigest off, Defender PUA
                  protection (+ optional network protection), firewall on, logon auditing
+      redirection : device redirection policy (drives, printers, USB/PnP, COM/LPT, smart
+                 cards, cameras blocked; clipboard, audio, microphone allowed by default)
       apps     : downloaded and installed silently - MSI or EXE, optional SHA-256 check,
                  optional detectPath to skip apps that are already installed,
                  fileName (URLs without a file name), files (inline config files written
@@ -91,6 +93,35 @@ if (Get-Prop $hard 'enabled' $false) {
         $null = auditpol.exe /set /subcategory:"Logon" /success:enable /failure:enable
         $null = auditpol.exe /set /subcategory:"Account Lockout" /failure:enable
     }
+}
+
+# ---------------------------------------------------------------- Device redirection
+# Session host policy ("Remote Desktop Session Host > Device and Resource Redirection").
+# The host pool's RDP properties are built from the same settings; the most restrictive
+# of the two wins, so enforcing here means a client can't opt back in.
+$redir = Get-Prop $config 'redirection' $null
+if ($null -ne $redir) {
+    Log 'Device redirection policy'
+    $ts = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+    # setting, registry value, data when BLOCKED, data when ALLOWED, default if not in config
+    $policies = @(
+        @('drives', 'fDisableCdm', 1, 0, $false),           # Do not allow drive redirection
+        @('printers', 'fDisableCpm', 1, 0, $false),         # Do not allow client printer redirection
+        @('comPorts', 'fDisableCcm', 1, 0, $false),         # Do not allow COM port redirection
+        @('comPorts', 'fDisableLPT', 1, 0, $false),         # Do not allow LPT port redirection
+        @('usbDevices', 'fDisablePNPRedir', 1, 0, $false),  # Do not allow supported Plug and Play device redirection
+        @('smartCards', 'fEnableSmartCard', 0, 1, $false),  # Do not allow smart card device redirection
+        @('cameras', 'fDisableCameraRedir', 1, 0, $false),  # Do not allow video capture redirection
+        @('clipboard', 'fDisableClip', 1, 0, $true),        # Do not allow Clipboard redirection
+        @('audioPlayback', 'fDisableCam', 1, 0, $true),     # Allow audio and video playback redirection
+        @('microphone', 'fDisableAudioCapture', 1, 0, $true) # Allow audio recording redirection
+    )
+    foreach ($p in $policies) {
+        $allowed = [bool](Get-Prop $redir $p[0] $p[4])
+        Set-Reg $ts $p[1] $(if ($allowed) { $p[3] } else { $p[2] })
+        if (-not $dry) { Log ("  {0}: {1}" -f $p[0], $(if ($allowed) { 'allowed' } else { 'blocked' })) }
+    }
+    Log '  Applies to new sessions (users sign out and back in).'
 }
 
 # ---------------------------------------------------------------- Applications

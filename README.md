@@ -321,6 +321,32 @@ It runs the same script on each host as the `Customize-SessionHost` run command,
 
 Start with build scripts. Move to an image (for example Azure Image Builder running these same scripts) if build times or download reliability become a problem. Neither keeps apps up to date on existing desktops. Without Intune, re-push with `-Customize`, use apps' own updaters (Microsoft 365 Apps updates itself), and use Azure Update Manager for Windows patches.
 
+## Device redirection (drives, printers, USB, …)
+
+Controlled by the `redirection` block in [`infra/customizations/customizations.json`](infra/customizations/customizations.json) (`true` = allowed):
+
+| Setting | Default | Notes |
+|---|---|---|
+| `drives` | blocked | Local drives in the session |
+| `printers` | blocked | Local printers |
+| `usbDevices` | blocked | USB and Plug and Play / MTP-PTP devices (phones, cameras as storage) |
+| `comPorts` | blocked | COM and LPT ports |
+| `smartCards` | blocked | Allow it if users sign in to apps inside the session with a smart card |
+| `cameras` | blocked | Webcams. Allow it if users make **Teams video calls** from the desktop. |
+| `clipboard` | allowed | Copy/paste both ways |
+| `audioPlayback` | allowed | Sound plays on the user's device |
+| `microphone` | allowed | Needed for calls |
+| `webAuthn` | allowed | Passkeys / Windows Hello for sign-ins inside the session. Authentication, not data. |
+
+Each setting is applied in **two places**, and Microsoft documents that the most restrictive one wins:
+1. **Host pool RDP properties**, built by the template from this block. Applied by `Deploy-Avd.ps1` (`-InfraOnly` is enough).
+2. **Policy on each session host** (*Remote Desktop Session Host → Device and Resource Redirection*), written by `Customize-SessionHost.ps1`. A client can't opt back in to something blocked on the host. New hosts get it during their build. For existing hosts:
+   ```powershell
+   .\scripts\Update-SessionHostConfig.ps1 -ParameterFile .\infra\params\prod.bicepparam -Customize -IncludeStopped
+   ```
+
+Changes apply to **new sessions**, so users sign out and back in. The registry values the script writes are checked in CI against Windows' own `TerminalServer.admx`: right policy, right state.
+
 ## Custom images
 
 `imageReference` takes either a marketplace image or an **Azure Compute Gallery** image. Microsoft recommends the gallery for production, for replication and versioning.

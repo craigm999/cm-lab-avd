@@ -715,6 +715,49 @@ if ($env:OS -eq 'Windows_NT') {
     catch { $failures.Add("Customize-SessionHost dry run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 }
 
+# Device redirection policy: every registry value the script writes is checked against
+# Windows' own TerminalServer.admx on this machine - policy name and resulting state.
+if ($env:OS -eq 'Windows_NT') {
+    Write-Host "`n== Device redirection policy vs TerminalServer.admx (Windows)" -ForegroundColor Cyan
+    $admxPath = Join-Path $env:WINDIR 'PolicyDefinitions\TerminalServer.admx'
+    $admlPath = Join-Path $env:WINDIR 'PolicyDefinitions\en-US\TerminalServer.adml'
+    if (-not ((Test-Path $admxPath) -and (Test-Path $admlPath))) { $failures.Add('TerminalServer.admx/adml not found on the runner') }
+    else {
+        [xml]$admx = Get-Content -Raw $admxPath
+        [xml]$adml = Get-Content -Raw $admlPath
+        $strings = @{}
+        foreach ($st in $adml.policyDefinitionResources.resources.stringTable.string) { $strings[$st.id] = $st.'#text' }
+        $redCfg = Get-Content -Raw (Join-Path $repo 'infra/customizations/customizations.json')
+        $b64r = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($redCfg))
+        $rOut = (& (Join-Path $repo 'infra/scripts/Customize-SessionHost.ps1') -ConfigBase64 $b64r -DryRun 'True' | Out-String)
+        $written = @{}
+        foreach ($m in [regex]::Matches($rOut, 'Terminal Services\\(\w+) = (\d+)')) { $written[$m.Groups[1].Value] = [int]$m.Groups[2].Value }
+        # value name -> expected policy (as named in the Microsoft Learn redirection pages) and state
+        $expected = [ordered]@{
+            fDisableCdm          = @('Do not allow drive redirection', 'Enabled')
+            fDisableCpm          = @('Do not allow client printer redirection', 'Enabled')
+            fDisableCcm          = @('Do not allow COM port redirection', 'Enabled')
+            fDisableLPT          = @('Do not allow LPT port redirection', 'Enabled')
+            fDisablePNPRedir     = @('Do not allow supported Plug and Play device redirection', 'Enabled')
+            fEnableSmartCard     = @('Do not allow smart card device redirection', 'Enabled')
+            fDisableCameraRedir  = @('Do not allow video capture redirection', 'Enabled')
+            fDisableClip         = @('Do not allow Clipboard redirection', 'Disabled')
+            fDisableCam          = @('Allow audio and video playback redirection', 'Enabled')
+            fDisableAudioCapture = @('Allow audio recording redirection', 'Enabled')
+        }
+        foreach ($vn in $expected.Keys) {
+            if (-not $written.ContainsKey($vn)) { $failures.Add("redirection: $vn not written"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $vn not written" -ForegroundColor Red; continue }
+            $pol = @($admx.policyDefinitions.policies.policy | Where-Object { $_.valueName -eq $vn -and $_.key -eq 'SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' }) | Select-Object -First 1
+            if (-not $pol) { $failures.Add("redirection: $vn is not a value in TerminalServer.admx"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $vn not in ADMX" -ForegroundColor Red; continue }
+            $enabledVal = if ($pol.enabledValue -and $pol.enabledValue.decimal) { [int]$pol.enabledValue.decimal.value } else { 1 }
+            $disabledVal = if ($pol.disabledValue -and $pol.disabledValue.decimal) { [int]$pol.disabledValue.decimal.value } else { 0 }
+            $state = if ($written[$vn] -eq $enabledVal) { 'Enabled' } elseif ($written[$vn] -eq $disabledVal) { 'Disabled' } else { "unknown($($written[$vn]))" }
+            $name = $strings[($pol.displayName -replace '^\$\(string\.(.+)\)$', '$1')]
+            Assert-Equal "$name = $state" "$($expected[$vn][0]) = $($expected[$vn][1])" "redirection: $vn"
+        }
+    }
+}
+
 # Developer-apps example: dry run of the shipped example file on Windows
 if ($env:OS -eq 'Windows_NT') {
     Write-Host "`n== Customize-SessionHost.ps1 developer-apps example (Windows, dry run)" -ForegroundColor Cyan
