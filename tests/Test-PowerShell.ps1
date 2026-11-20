@@ -723,7 +723,8 @@ if ($env:OS -eq 'Windows_NT') {
         Assert-Equal ($exOut -match "write \S*avdapp-IntelliJIDEACommunity\\silent\.config") $true 'dev apps: JetBrains silent.config written next to installer'
         Assert-Equal ($exOut -match '/CONFIG=\S*avdapp-IntelliJIDEACommunity\\silent\.config') $true 'dev apps: {dir} replaced in arguments'
         Assert-Equal ($exOut -match '\{dir\}') $false 'dev apps: no unreplaced {dir}'
-        Assert-Equal ($exOut -match "App 'Git': \[dry-run\]") $true 'dev apps: Git planned'
+        # The Windows runner already has Git at the example's detectPath, so it may be skipped.
+        Assert-Equal ($exOut -match "App 'Git': (\[dry-run\]|already installed)") $true 'dev apps: Git planned (or skipped via detectPath)'
     }
     catch { $failures.Add("Developer apps dry run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 
