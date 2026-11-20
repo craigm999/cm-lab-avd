@@ -715,6 +715,24 @@ if ($env:OS -eq 'Windows_NT') {
     catch { $failures.Add("Customize-SessionHost dry run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 }
 
+# DISCOVERY (informational): Tenant Restrictions v2 Group Policy definition on this Windows build
+if ($env:OS -eq 'Windows_NT') {
+    Write-Host "`n== DISCOVERY: Tenant Restrictions ADMX" -ForegroundColor Cyan
+    foreach ($f in Get-ChildItem (Join-Path $env:WINDIR 'PolicyDefinitions') -Filter *.admx) {
+        $raw = Get-Content -Raw $f.FullName
+        if ($raw -match 'TenantRestrictions|Tenant Restrictions') {
+            Microsoft.PowerShell.Utility\Write-Host "ADMX FILE: $($f.Name)"
+            [xml]$x = $raw
+            foreach ($pol in $x.policyDefinitions.policies.policy) {
+                if ($pol.OuterXml -match 'TenantRestrictions|Payload') { Microsoft.PowerShell.Utility\Write-Host ("POLICY: " + $pol.OuterXml) }
+            }
+        }
+    }
+    $sec = Get-ChildItem (Join-Path $env:WINDIR 'PolicyDefinitions') -Filter *.admx | Select-String -Pattern 'NoConnectedUser' -List
+    Microsoft.PowerShell.Utility\Write-Host ("NoConnectedUser in ADMX: " + (@($sec | ForEach-Object { $_.Filename }) -join ','))
+    Microsoft.PowerShell.Utility\Write-Host ("OS: " + (Get-CimInstance Win32_OperatingSystem).Caption + ' ' + [Environment]::OSVersion.Version)
+}
+
 # Device redirection policy: every registry value the script writes is checked against
 # Windows' own TerminalServer.admx on this machine - policy name and resulting state.
 if ($env:OS -eq 'Windows_NT') {
