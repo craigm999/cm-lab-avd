@@ -424,6 +424,11 @@ try {
     Write-Host ''
     Write-Host "Outputs saved to $outputsFile"
 
+    # Personal-pool automation (deployPoolAutomation = true): publish runbook, config, schedule.
+    if ($outputs.PSObject.Properties['automationAccountName'] -and "$($outputs.automationAccountName.value)") {
+        & (Join-Path $PSScriptRoot 'Publish-AvdPoolAutomation.ps1') -ParameterFile $ParameterFile
+    }
+
     # The name users see in Windows App is the friendlyName of the desktop resource inside
     # the app group ("SessionDesktop"). That resource is read-only in ARM templates, so set
     # it here - the documented route is an update (PATCH), e.g. Update-AzWvdDesktop.

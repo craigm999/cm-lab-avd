@@ -152,6 +152,32 @@ param vmSecurityType string = 'TrustedLaunch'
 @description('Run build-time customisation on each new session host (optimisation, hardening, apps) from infra/customizations/customizations.json, before the host registers. Re-apply to existing hosts with scripts/Update-SessionHostConfig.ps1 -Customize.')
 param applyCustomizations bool = true
 
+// ----------------------------------------------------------------------------- Pool automation (Personal)
+@description('[Personal] Deploy an Automation account whose daily runbook keeps spare desktops available and removes long-unused desktops. Published by scripts/Publish-AvdPoolAutomation.ps1 (run automatically by Deploy-Avd.ps1).')
+param deployPoolAutomation bool = false
+
+@description('[Pool automation] Free (unassigned) desktops to keep available.')
+@minValue(0)
+param spareDesktops int = 5
+
+@description('[Pool automation] Delete desktops not connected to for this many days.')
+@minValue(7)
+param deleteUnusedAfterDays int = 90
+
+@description('[Pool automation] Report: only report what it would do. Apply: act.')
+@allowed([
+  'Report'
+  'Apply'
+])
+param poolAutomationMode string = 'Report'
+
+@description('[Pool automation] Safety limits per daily run.')
+@minValue(0)
+param maxDesktopsAddedPerRun int = 10
+
+@minValue(0)
+param maxDesktopsDeletedPerRun int = 5
+
 @description('Local administrator user name for the session hosts (break-glass only; users sign in with Entra ID).')
 param localAdminUsername string = 'avdadmin'
 
@@ -517,6 +543,95 @@ module serviceRbac 'modules/hosts-rbac.bicep' = if (!empty(avdServicePrincipalOb
 // =====================================================================================
 // Session hosts
 // =====================================================================================
+// =====================================================================================
+// Pool automation (Personal): spares + tidy-up runbook
+// =====================================================================================
+var deployAutomation = deployPoolAutomation && isPersonal
+var contributorRoleId = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
+var networkContributorRoleId = '4d97b98b-1d4f-4787-a291-c67834d212e7'
+var logAnalyticsReaderRoleId = '73c42c96-874c-492b-b04d-ab87d138a893'
+// Scopes must be known when the deployment starts, so derive them from names/IDs.
+var vnetSubForRole = newNetwork ? subscription().subscriptionId : split(existingSessionHostSubnetId, '/')[2]
+var vnetRgForRole = newNetwork ? rgNetworkName : split(existingSessionHostSubnetId, '/')[4]
+var vnetNameForRole = newNetwork ? (empty(vnetName) ? 'vnet-${nameSuffix}' : vnetName) : split(existingSessionHostSubnetId, '/')[8]
+var lawSubForRole = newLogAnalytics ? subscription().subscriptionId : split(existingLogAnalyticsWorkspaceId, '/')[2]
+var lawRgForRole = newLogAnalytics ? rgMonitorName : split(existingLogAnalyticsWorkspaceId, '/')[4]
+var lawNameForRole = newLogAnalytics ? 'log-${nameSuffix}' : last(split(existingLogAnalyticsWorkspaceId, '/'))
+
+module automation 'modules/automation.bicep' = if (deployAutomation) {
+  name: 'avd-automation'
+  scope: resourceGroup(rgServiceName)
+  params: {
+    location: location
+    name: 'aa-${nameSuffix}'
+    tags: allTags
+  }
+  dependsOn: [
+    rgs
+  ]
+}
+
+// Build and delete desktops in the hosts RG.
+module automationHostsRole 'modules/rg-role.bicep' = if (deployAutomation) {
+  name: 'avd-automation-hosts-role'
+  scope: resourceGroup(rgHostsName)
+  params: {
+    principalId: automation!.outputs.principalId
+    roleDefinitionId: contributorRoleId
+  }
+}
+
+// New desktops' NICs join the session host subnet.
+module automationVnetRole 'modules/vnet-role.bicep' = if (deployAutomation) {
+  name: 'avd-automation-vnet-role'
+  scope: resourceGroup(vnetSubForRole, vnetRgForRole)
+  params: {
+    vnetName: vnetNameForRole
+    principalId: automation!.outputs.principalId
+    roleDefinitionId: networkContributorRoleId
+  }
+  dependsOn: [
+    network
+  ]
+}
+
+// Read connection history (WVDConnections).
+module automationLawRole 'modules/law-role.bicep' = if (deployAutomation) {
+  name: 'avd-automation-law-role-${uniqueString(lawSubForRole, lawRgForRole)}'
+  scope: resourceGroup(lawSubForRole, lawRgForRole)
+  params: {
+    workspaceName: lawNameForRole
+    principalId: automation!.outputs.principalId
+    roleDefinitionId: logAnalyticsReaderRoleId
+  }
+  dependsOn: [
+    monitoring
+  ]
+}
+
+// Everything the runbook passes to the session host template spec for a new desktop
+// (vmName, zone and adminPassword are added by the runbook).
+var automationSessionHostParameters = {
+  location: location
+  vmSize: vmSize
+  subnetId: sessionHostSubnetId
+  imageReference: imageReference
+  osDiskType: osDiskType
+  osDiskSizeGB: osDiskSizeGB
+  encryptionAtHost: encryptionAtHost
+  securityType: vmSecurityType
+  adminUsername: localAdminUsername
+  hostPoolResourceGroupName: rgServiceName
+  hostPoolName: hostPoolName
+  avdAgentDscPackageUrl: avdAgentDscPackageUrl
+  fslogixEnabled: deployFslogixStorage
+  fslogixVhdLocation: deployFslogixStorage ? fslogixStorage!.outputs.fslogixUncPath : ''
+  fslogixProfileSizeMB: fslogixProfileSizeMB
+  applyCustomizations: applyCustomizations
+  customizationConfig: customizationConfig
+  tags: allTags
+}
+
 // Deploy hosts 20 at a time to stay well inside ARM / Compute API throttling limits.
 @batchSize(20)
 module sessionHosts 'modules/sessionhost.bicep' = [
@@ -573,3 +688,21 @@ output sessionHostSubnetId string = sessionHostSubnetId
 output fslogixStorageAccountName string = deployFslogixStorage ? fslogixStorage!.outputs.storageAccountName : ''
 output fslogixUncPath string = deployFslogixStorage ? fslogixStorage!.outputs.fslogixUncPath : ''
 output fslogixNetworkAccess string = deployFslogixStorage ? fslogixNetworkAccess : ''
+output automationAccountName string = deployAutomation ? automation!.outputs.name : ''
+output automationResourceGroup string = deployAutomation ? rgServiceName : ''
+output automationConfig object = deployAutomation
+  ? {
+      subscriptionId: subscription().subscriptionId
+      hostPoolId: hostPool.outputs.hostPoolId
+      hostsResourceGroup: rgHostsName
+      sessionHostPrefix: sessionHostNamePrefix
+      spareTarget: spareDesktops
+      unusedDays: deleteUnusedAfterDays
+      maxAddPerRun: maxDesktopsAddedPerRun
+      maxDeletePerRun: maxDesktopsDeletedPerRun
+      mode: poolAutomationMode
+      workspaceResourceId: logAnalyticsWorkspaceId
+      zones: availabilityZones
+      sessionHostParameters: automationSessionHostParameters
+    }
+  : {}

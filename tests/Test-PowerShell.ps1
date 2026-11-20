@@ -243,6 +243,11 @@ function global:az {
         $i = [array]::IndexOf([string[]]$args, '--parameters')
         if ($i -ge 0) { $global:DeployParamText = Get-Content -Raw -LiteralPath $args[$i + 1] }
     }
+    $bi2 = [array]::IndexOf([string[]]$args, '--body')
+    $ui2 = [array]::IndexOf([string[]]$args, '--url')
+    if ($bi2 -ge 0 -and $ui2 -ge 0 -and $global:BodyLog) {
+        $global:BodyLog.Add([pscustomobject]@{ Line = $line; Url = "$($args[$ui2 + 1])"; Body = (Get-Content -Raw -LiteralPath ("$($args[$bi2 + 1])".TrimStart('@'))) })
+    }
     if ($line -like 'rest --method patch*') {
         $bi = [array]::IndexOf([string[]]$args, '--body')
         if ($bi -ge 0) { $global:PatchBody = Get-Content -Raw -LiteralPath ("$($args[$bi + 1])".TrimStart('@')) }
@@ -776,6 +781,118 @@ try {
 }
 catch { $failures.Add("Add-CustomizationApp threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 finally { Remove-Item $tmpCfg -ErrorAction SilentlyContinue; Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue }
+
+# ------------------------------------------------------------------- Pool maintenance runbook (REST mocked)
+Write-Host "`n== Invoke-AvdPoolMaintenance.ps1 (REST mocked)" -ForegroundColor Cyan
+$runbook = Join-Path $repo 'infra/automation/Invoke-AvdPoolMaintenance.ps1'
+$pool = '/subscriptions/sub/resourceGroups/rg-svc/providers/Microsoft.DesktopVirtualization/hostPools/pool'
+$vmBase = '/subscriptions/sub/resourceGroups/rg-hosts/providers/Microsoft.Compute/virtualMachines'
+$cfgFile = Join-Path ([IO.Path]::GetTempPath()) ('aacfg-' + [guid]::NewGuid().ToString('N') + '.json')
+[IO.File]::WriteAllText($cfgFile, (@{
+    subscriptionId = 'sub'; hostPoolId = $pool; hostsResourceGroup = 'rg-hosts'; sessionHostPrefix = 'avdpd'
+    spareTarget = 5; unusedDays = 90; maxAddPerRun = 10; maxDeletePerRun = 5; mode = 'Report'
+    workspaceResourceId = '/subscriptions/sub/resourceGroups/rg-mon/providers/Microsoft.OperationalInsights/workspaces/law'
+    zones = @('1', '2', '3'); templateSpecVersionId = 'ts-id'
+    sessionHostParameters = @{ vmSize = 'Standard_D4s_v5'; location = 'uksouth' }
+} | ConvertTo-Json -Depth 10))
+$shJson = '{"value":[' +
+    '{"name":"pool/avdpd-001","properties":{"assignedUser":"alice@contoso.com","sessions":0}},' +
+    '{"name":"pool/avdpd-002","properties":{"assignedUser":"bob@contoso.com","sessions":0}},' +
+    '{"name":"pool/avdpd-003","properties":{"assignedUser":null,"sessions":0}},' +
+    '{"name":"pool/avdpd-004","properties":{"assignedUser":"carol@contoso.com","sessions":1}},' +
+    '{"name":"pool/avdpd-005","properties":{"assignedUser":null,"sessions":0}},' +
+    '{"name":"pool/avdpd-007","properties":{"assignedUser":"dave@contoso.com","sessions":0}}]}'
+$vmJson = '{"value":[' +
+    '{"name":"avdpd-001","id":"' + $vmBase + '/avdpd-001","tags":{"avd-last-used":"2026-11-01"},"properties":{"timeCreated":"2026-01-01T00:00:00Z"}},' +
+    '{"name":"avdpd-002","id":"' + $vmBase + '/avdpd-002","tags":{"avd-last-used":"2026-07-01"},"properties":{"timeCreated":"2026-01-01T00:00:00Z"}},' +
+    '{"name":"avdpd-003","id":"' + $vmBase + '/avdpd-003","properties":{"timeCreated":"2026-01-01T00:00:00Z"}},' +
+    '{"name":"avdpd-004","id":"' + $vmBase + '/avdpd-004","tags":{"avd-last-used":"2026-06-01"},"properties":{"timeCreated":"2026-01-01T00:00:00Z"}},' +
+    '{"name":"avdpd-005","id":"' + $vmBase + '/avdpd-005","properties":{"timeCreated":"2026-11-19T00:00:00Z"}},' +
+    '{"name":"avdpd-006","id":"' + $vmBase + '/avdpd-006","properties":{"timeCreated":"2026-11-20T10:00:00Z"}},' +
+    '{"name":"avdpd-007","id":"' + $vmBase + '/avdpd-007","tags":{"avd-last-used":"2026-01-01","avd-keep":"true"},"properties":{"timeCreated":"2026-01-01T00:00:00Z"}},' +
+    '{"name":"jumpbox-01","id":"' + $vmBase + '/jumpbox-01","properties":{"timeCreated":"2020-01-01T00:00:00Z"}}]}'
+$global:RestCalls = [System.Collections.Generic.List[object]]::new()
+function global:Invoke-RestMethod {
+    param($Method = 'GET', $Uri, $Headers, $Body, $ContentType)
+    $global:RestCalls.Add([pscustomobject]@{ Method = "$Method".ToUpper(); Uri = "$Uri"; Body = $Body })
+    if ($Method -eq 'GET' -and $Uri -like '*/sessionHosts?*') { return ($shJson | ConvertFrom-Json) }
+    if ($Method -eq 'GET' -and $Uri -like '*/virtualMachines?*') { return ($vmJson | ConvertFrom-Json) }
+    if ($Method -eq 'GET' -and $Uri -like '*/workspaces/law?*') { return ('{"properties":{"customerId":"cid"}}' | ConvertFrom-Json) }
+    if ($Uri -like 'https://api.loganalytics.io/*') { return ('{"tables":[{"rows":[["avdpd-001","2026-11-19T09:00:00Z"]]}]}' | ConvertFrom-Json) }
+    return $null
+}
+$global:AzResponses = [ordered]@{ 'account get-access-token*' = 'tok' }
+try {
+    $global:RestCalls.Clear()
+    $rep = (& $runbook -ConfigPath $cfgFile -NowUtc '2026-11-20T12:00:00Z' | Out-String)
+    Microsoft.PowerShell.Utility\Write-Host $rep
+    Assert-Equal ($rep -match '6 in pool \(4 assigned, 2 free\), 1 build\(s\) in progress') $true 'pool: inventory (jumpbox ignored, avdpd-006 building)'
+    Assert-Equal ($rep -match 'would delete avdpd-002 - assigned to bob@contoso\.com, last used 2026-07-01') $true 'pool: long-unused assigned desktop deleted'
+    Assert-Equal ($rep -match 'would delete avdpd-003') $false 'pool: unused spare kept (needed for the spare target)'
+    Assert-Equal ($rep -match 'would delete avdpd-007') $false 'pool: avd-keep tag respected'
+    Assert-Equal ($rep -match '1 kept by avd-keep tag') $true 'pool: kept desktops reported'
+    Assert-Equal ($rep -match 'would delete avdpd-004') $false 'pool: desktop with an active session never deleted'
+    Assert-Equal ($rep -match 'would deploy: avdpd-008, avdpd-009') $true 'pool: tops up spares after the highest number'
+    $tagged = @($global:RestCalls | Where-Object { $_.Method -eq 'PATCH' -and $_.Uri -like '*/tags/default*' })
+    Assert-Equal (@($tagged | ForEach-Object { ($_.Uri -split '/virtualMachines/')[1].Split('/')[0] }) -join ',') 'avdpd-001,avdpd-004' 'pool: last-used tags stamped from connections and active sessions'
+    Assert-Equal @($global:RestCalls | Where-Object { $_.Method -in @('DELETE', 'PUT') }).Count 0 'pool: Report mode deletes and deploys nothing'
+
+    $global:RestCalls.Clear()
+    $env:AVD_LOCAL_ADMIN_PASSWORD = 'Auto-Passw0rd!x'
+    $app = (& $runbook -ConfigPath $cfgFile -Mode Apply -NowUtc '2026-11-20T12:00:00Z' | Out-String)
+    $dels = @($global:RestCalls | Where-Object { $_.Method -eq 'DELETE' } | ForEach-Object { $_.Uri })
+    Assert-Equal ($dels.Count -eq 2 -and $dels[0] -like "$pool/sessionHosts/avdpd-002?*force=true" -and $dels[1] -like "$vmBase/avdpd-002?*") $true 'pool apply: session host then VM deleted'
+    Assert-Equal (@($global:RestCalls | Where-Object { $_.Method -eq 'PATCH' -and $_.Uri -like "$pool?*" -and "$($_.Body)" -match 'registrationTokenOperation' }).Count) 1 'pool apply: registration token refreshed'
+    $deps = @($global:RestCalls | Where-Object { $_.Method -eq 'PUT' -and $_.Uri -like '*/deployments/avd-auto-*' })
+    Assert-Equal $deps.Count 2 'pool apply: two desktops deployed'
+    Assert-Equal ("$($deps[0].Body)" -match '"vmName":\{"value":"avdpd-008"\}' -and "$($deps[0].Body)" -match '"zone":\{"value":"2"\}' -and "$($deps[0].Body)" -match '"id":"ts-id"' -and "$($deps[0].Body)" -match '"adminPassword":\{"value":"Auto-Passw0rd!x"\}') $true 'pool apply: deployment uses the template spec, name, zone and password'
+}
+catch { $failures.Add("Pool maintenance runbook threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+finally { Remove-Item $cfgFile -ErrorAction SilentlyContinue; Remove-Item Function:\Invoke-RestMethod -ErrorAction SilentlyContinue; $global:AzResponses = $null }
+
+# ------------------------------------------------------------------- Publish-AvdPoolAutomation (az mocked)
+Write-Host "`n== Publish-AvdPoolAutomation.ps1 (az mocked)" -ForegroundColor Cyan
+$pubParams = Join-Path $repo 'infra/params/cipub.bicepparam'
+$pubOutputs = Join-Path $repo 'infra/params/cipub.outputs.json'
+[IO.File]::WriteAllText($pubParams, "// subscriptionId: 00000000-0000-0000-0000-000000000000`nusing '../main.bicep'`n")
+[IO.File]::WriteAllText($pubOutputs, (@{
+    automationAccountName = @{ value = 'aa-avd' }; automationResourceGroup = @{ value = 'rg-svc' }
+    automationConfig = @{ value = @{ subscriptionId = '00000000-0000-0000-0000-000000000000'; mode = 'Report'; sessionHostPrefix = 'avdpd'; sessionHostParameters = @{ vmSize = 'Standard_D4s_v5' } } }
+} | ConvertTo-Json -Depth 10))
+$global:BodyLog = [System.Collections.Generic.List[object]]::new()
+$global:AzResponses = [ordered]@{
+    'resource show --ids*' = 'uksouth'
+    'ts create*' = '{}'
+    'ts show*' = 'ts-version-id'
+    'rest --method get --url *runbooks/AvdPoolMaintenance?*' = 'Published'
+    'rest --method get --url *schedules/AvdPoolMaintenance-daily?*' = 1
+    'rest --method get --url *jobSchedules?*' = '0'
+    'rest --method *' = '{}'
+}
+$global:AzCalls.Clear()
+try {
+    & (Join-Path $repo 'scripts/Publish-AvdPoolAutomation.ps1') -ParameterFile $pubParams
+    $calls = $global:AzCalls -join "`n"
+    Assert-Equal ($calls -match 'ts create --name avd-sessionhost --version 1\.0 --resource-group rg-svc --location uksouth --template-file \S+sessionhost\.bicep') $true 'publish: session host template spec'
+    $rb = @($global:BodyLog | Where-Object { $_.Url -like '*/runbooks/AvdPoolMaintenance?*' })
+    Assert-Equal ($rb.Count -eq 1 -and $rb[0].Body -match '"runbookType":\s*"PowerShell"') $true 'publish: runbook created (PowerShell 5.1 runtime)'
+    $content = @($global:BodyLog | Where-Object { $_.Url -like '*/draft/content?*' })
+    Assert-Equal ($content.Count -eq 1 -and $content[0].Line -match 'Content-Type=text/powershell' -and $content[0].Body -match 'AVD pool maintenance') $true 'publish: runbook content uploaded'
+    Assert-Equal ($calls -match 'rest --method POST --url \S+/runbooks/AvdPoolMaintenance/publish') $true 'publish: runbook published'
+    $cfgVar = @($global:BodyLog | Where-Object { $_.Url -like '*/variables/AvdPoolAutomationConfig?*' })
+    Assert-Equal ($cfgVar.Count -eq 1 -and $cfgVar[0].Body -match 'ts-version-id' -and $cfgVar[0].Body -match '"isEncrypted":\s*false') $true 'publish: config variable includes the template spec ID'
+    $pwVar = @($global:BodyLog | Where-Object { $_.Url -like '*/variables/AvdLocalAdminPassword?*' })
+    Assert-Equal ($pwVar.Count -eq 1 -and $pwVar[0].Body -match '"isEncrypted":\s*true') $true 'publish: password variable encrypted'
+    Assert-Equal (@($global:BodyLog | Where-Object { $_.Url -like '*/schedules/AvdPoolMaintenance-daily?*' -and $_.Body -match '"frequency":\s*"Day"' }).Count) 1 'publish: daily schedule created'
+    Assert-Equal (@($global:BodyLog | Where-Object { $_.Url -like '*/jobSchedules/*' -and $_.Body -match 'AvdPoolMaintenance' }).Count) 1 'publish: schedule linked to runbook'
+    $localCfg = Join-Path $repo 'infra/params/cipub.automation.json'
+    Assert-Equal ((Test-Path $localCfg) -and ((Get-Content -Raw $localCfg) -match 'ts-version-id')) $true 'publish: local preview config written'
+}
+catch { $failures.Add("Publish-AvdPoolAutomation threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+finally {
+    Remove-Item $pubParams, $pubOutputs, (Join-Path $repo 'infra/params/cipub.automation.json') -ErrorAction SilentlyContinue
+    $global:AzResponses = $null; $global:BodyLog = $null
+}
 
 Remove-Item Function:\az -ErrorAction SilentlyContinue
 

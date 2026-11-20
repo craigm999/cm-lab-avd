@@ -90,6 +90,7 @@ scripts/
   Test-AvdUserAccess.ps1     # read-only: why can't this user see / open the desktop?
   Set-FslogixStorageAuth.ps1 # one-off Entra app setup for FSLogix (privatelink, consent, CA check)
   Get-FslogixHostDiagnostics.ps1 # read-only: why won't profiles load on this host?
+  Publish-AvdPoolAutomation.ps1 # publishes the spares/tidy-up runbook (run by Deploy-Avd.ps1)
   deploy.sh                  # same, for macOS / Linux
   Enable-EntraSSO.ps1        # one-off tenant config for Entra SSO
 ```
@@ -350,6 +351,52 @@ You can also re-run the questionnaire and choose *gallery*.
 ## Desktop name in Windows App
 
 Users see the friendlyName of the desktop resource inside the app group, not the app group's name. That resource (`SessionDesktop`) is read-only in ARM templates, so `Deploy-Avd.ps1` sets it to `desktopFriendlyName` after each deployment. To change the name, edit `desktopFriendlyName` and run `Deploy-Avd.ps1 -InfraOnly`. Users see it after their feed refreshes; sign out of Windows App and back in to force it.
+
+## Pool automation: spare desktops and tidy-up (Personal)
+
+For personal pools, an optional daily job keeps **N spare desktops** ready and removes desktops **nobody has used for 90 days**. Turn it on in the parameter file:
+
+```bicep
+param deployPoolAutomation = true
+param spareDesktops = 5              // free (unassigned) desktops to keep ready
+param deleteUnusedAfterDays = 90
+param poolAutomationMode = 'Report'  // start with Report; switch to 'Apply' once happy
+param maxDesktopsAddedPerRun = 10    // safety limits per daily run
+param maxDesktopsDeletedPerRun = 5
+```
+
+Then run `Deploy-Avd.ps1 -InfraOnly`, or a normal deploy. The deployment creates an Automation account with a managed identity. It gets only:
+- *Contributor* on the session host resource group;
+- *Host Pool Contributor* and *Reader* on the service resource group;
+- *Network Contributor* on the VNet;
+- *Log Analytics Reader* on the workspace.
+
+`Deploy-Avd.ps1` then runs [`Publish-AvdPoolAutomation.ps1`](scripts/Publish-AvdPoolAutomation.ps1). That publishes the runbook, its settings and the local admin password (as an encrypted Automation variable), the session host template spec, and a daily 06:30 UTC schedule.
+
+**What it does each day** ([`infra/automation/Invoke-AvdPoolMaintenance.ps1`](infra/automation/Invoke-AvdPoolMaintenance.ps1)):
+1. **Tracks usage.** It reads the last two days of AVD connections from Log Analytics and stamps each desktop VM with an `avd-last-used` tag. The 90-day clock lives on the VM, so it doesn't depend on Log Analytics retention. A desktop never connected to counts from its creation date. Tags are written in Report mode too, so tracking starts on day one.
+2. **Tidies up.** Desktops idle for `deleteUnusedAfterDays` are deleted: removed from the host pool, then the VM with its NIC and disk. It never deletes:
+   - a desktop with an active session;
+   - a desktop tagged **`avd-keep = true`**;
+   - a spare that's still needed to meet the spare target.
+
+   It deletes at most `maxDesktopsDeletedPerRun` per run, most-idle first.
+3. **Tops up spares.** If fewer than `spareDesktops` are unassigned, counting builds in progress, it deploys more. It uses the same session host template as the main deployment, so new desktops get the same image, profile settings and customisation. They're numbered after the highest existing desktop and spread across zones.
+
+**Report first.** In `Report` mode the job lists what it would delete and add, and changes nothing apart from usage tags. Check the job output for a few days (*Automation account → Jobs*), or preview locally with your own login:
+
+```powershell
+.\infra\automation\Invoke-AvdPoolMaintenance.ps1 -ConfigPath .\infra\params\prod.automation.json
+```
+
+Then set `poolAutomationMode = 'Apply'` and run `Deploy-Avd.ps1 -InfraOnly` again.
+
+**Things to know:**
+- **Deleting a personal desktop deletes that user's local data** (profile on the VM). Tag anyone who must be kept with `avd-keep = true`, or keep FSLogix or OneDrive Known Folder Move for user data.
+- **Entra device objects** of deleted desktops are listed in the job output but not deleted, because that needs a directory role, not just Azure RBAC. Clean them up periodically in *Entra ID → Devices*, which has a stale-device filter.
+- **New desktops build in ~30–60 minutes.** The job counts them as "building" so it doesn't over-provision, and flags any that never register.
+- **Password and settings:** change the local admin password or any setting by re-running `Deploy-Avd.ps1 -InfraOnly`. That republishes everything.
+- **vCPU quota:** spares need quota too. With 5 spare D4s_v5 desktops that's 20 vCPU on top of your assigned desktops.
 
 ## Updating an existing deployment
 
