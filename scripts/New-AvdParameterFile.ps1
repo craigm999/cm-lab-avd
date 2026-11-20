@@ -850,8 +850,7 @@ Write-Host "    2. .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\$envir
 Write-Host '       (prompts for the session host local admin password; macOS/Linux: scripts/deploy.sh)'
 if ($pilot -lt $hostsNeeded) {
     Write-Host "    4. Later, to add the remaining $($hostsNeeded - $pilot) hosts, edit $environmentName.bicepparam:"
-    Write-Host "         param sessionHostStartIndex = $pilot"
-    Write-Host "         param sessionHostCountOverride = $($hostsNeeded - $pilot)"
-    Write-Host '       then run Deploy-Avd.ps1 again (-WhatIf first).'
+    Write-Host '         param sessionHostCountOverride = -1'
+    Write-Host '       then run Deploy-Avd.ps1 again (-WhatIf first). It adds only the hosts that do not exist yet.'
     if ($deployScalingPlan) { Write-Host "    Tip: tag pilot hosts 'ExcludeFromScaling' so autoscale doesn't power them off while you test." }
 }

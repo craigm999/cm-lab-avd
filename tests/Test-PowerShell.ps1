@@ -494,6 +494,29 @@ Remove-Item $pdParams -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $repo 'infra/params/cipdbig.outputs.json') -ErrorAction SilentlyContinue
 $global:HostDeploys.Clear()
 
+# Deploy-Avd: pilot cap left in the file -> plain run adds nothing, and says why
+Write-Host "`n== Deploy-Avd.ps1 pilot cap hint (az mocked)" -ForegroundColor Cyan
+$pilotParams = Join-Path $repo 'infra/params/cipilot.bicepparam'
+$pilotText = ((Get-Content -Raw $exampleParams) -replace "using 'main.bicep'", "using '../main.bicep'") -replace '(?m)^param sessionHostCountOverride = .*$', 'param sessionHostCountOverride = 1'
+[IO.File]::WriteAllText($pilotParams, $pilotText)
+$global:AzResponses = $null; $global:MockVmNames = '["avdsh-001"]'; $global:HostBuffer.Clear(); $global:HostDeploys.Clear()
+try {
+    & $deployScript -ParameterFile $pilotParams -WhatIf
+    $out = ($global:HostBuffer) -join "`n"
+    Assert-Equal ($out -match 'no new session hosts') $true 'pilot cap: nothing to add'
+    Assert-Equal ($out -match "file says 100 host\(s\).*caps this at 1") $true 'pilot cap: explains the cap'
+    Assert-Equal ($out -match "set it to -1") $true 'pilot cap: says how to lift it'
+}
+catch { $failures.Add("Deploy-Avd pilot cap threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+$global:HostBuffer.Clear()
+try {
+    & $deployScript -ParameterFile $pilotParams -InfraOnly -WhatIf
+    Assert-Equal ((($global:HostBuffer) -join "`n") -match 'caps this') $false 'pilot cap: no hint with -InfraOnly'
+}
+catch { $failures.Add("Deploy-Avd pilot cap -InfraOnly threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+Remove-Item $pilotParams -ErrorAction SilentlyContinue
+$global:MockVmNames = '[]'
+
 # Set-AvdPersonalAssignment: -FromGroup fills free desktops, skips users who already have one
 Write-Host "`n== Set-AvdPersonalAssignment.ps1 (az mocked)" -ForegroundColor Cyan
 $assignScript = Join-Path $repo 'scripts/Set-AvdPersonalAssignment.ps1'

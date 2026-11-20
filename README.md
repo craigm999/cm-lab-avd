@@ -186,7 +186,7 @@ Session hosts deploy 20 at a time. A full 100-host deployment takes roughly 45â€
    param sessionHostCountOverride = 1
    param sessionHostStartIndex = 0
    ```
-   This deploys everything except the other 99 hosts: host pool, app group, workspace, scaling plan, storage, network, RBAC and `avdsh-001`. You can test sign-in, SSO, FSLogix profiles and outbound access end to end. The pilot needs only 8 vCPU of quota.
+   This deploys everything except the other 99 hosts: host pool, app group, workspace, scaling plan, storage, network, RBAC and `avdsh-001`. **The pilot value stays in the file** and caps every later plain run at that number, so change it back to `-1` (step 3) when you scale out. You can test sign-in, SSO, FSLogix profiles and outbound access end to end. The pilot needs only 8 vCPU of quota.
 
 2. **Keep the pilot host on while testing.** Autoscale can power off a single host outside business hours. Tag the VM `ExcludeFromScaling` (the plan's exclusion tag), or set `deployScalingPlan = false` for the pilot run. Start VM on Connect wakes a stopped host when someone signs in either way.
 
@@ -197,7 +197,7 @@ Session hosts deploy 20 at a time. A full 100-host deployment takes roughly 45â€
    ```powershell
    .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -AddHosts 99
    ```
-   This creates `avdsh-002` to `avdsh-100` and leaves `avdsh-001` untouched. Zone placement continues round-robin, so the final spread is still 34/33/33. Raise the vCPU quota to 800 before this run. There's no batch limit (see *How hosts are deployed* below). A plain run without `-AddHosts` also works: it creates every host the file describes that doesn't exist yet.
+   Or set `param sessionHostCountOverride = -1` and run without `-AddHosts`, which creates every host the file describes that doesn't exist yet. `-AddHosts` creates `avdsh-002` to `avdsh-100` and leaves `avdsh-001` untouched. Zone placement continues round-robin, so the final spread is still 34/33/33. Raise the vCPU quota to 800 before this run. There's no batch limit (see *How hosts are deployed* below). A plain run without `-AddHosts` also works: it creates every host the file describes that doesn't exist yet.
 
    On macOS/Linux with `deploy.sh`, set `sessionHostStartIndex = 1` and `sessionHostCountOverride = 99` in the file instead.
 
@@ -254,7 +254,7 @@ The type of an existing host pool can't be changed, so a personal deployment cre
    .\scripts\Set-AvdPersonalAssignment.ps1 -ParameterFile .\infra\params\prod.bicepparam -FromGroup 'AVD Users' -WhatIf
    ```
    It gives every group member who has no desktop yet the next free one. You can also use `-User` with `-SessionHost`, or `-CsvPath` with columns `User,SessionHost`. `Test-AvdUserAccess.ps1` shows whether a user has a desktop assigned.
-4. **Scale out.** Remove the pilot `sessionHostCountOverride` and run again. Every missing desktop is created, each in its own deployment, so a run can create all 1,000 (see *How hosts are deployed*):
+4. **Scale out.** Set the pilot `sessionHostCountOverride` back to `-1` and run again. Every missing desktop is created, each in its own deployment, so a run can create all 1,000 (see *How hosts are deployed*):
    ```powershell
    .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -ThrottleLimit 40
    ```

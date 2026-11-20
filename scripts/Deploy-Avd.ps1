@@ -216,6 +216,13 @@ elseif ($planned.Count -gt 1) {
     Write-Host ('  This run     : {0} session hosts, {1} to {2}, {3} at a time' -f $planned.Count, $plannedNames[0], $plannedNames[-1], $ThrottleLimit)
 }
 else { Write-Host '  This run     : no new session hosts (shared resources only)' }
+# A pilot setting left in the file caps a plain run, which then has nothing to add.
+$required = if ($personalPool) { $users } else { [int][math]::Ceiling($users / $perHost) }
+if (-not $InfraOnly -and -not $HostNames -and $AddHosts -le 0 -and $override -ge 0 -and $start + $override -lt $required) {
+    Write-Host ("  NOTE: the file says {0} host(s) (targetUserCount = {1}) but caps this at {2} with" -f $required, $users, ($start + $override)) -ForegroundColor Yellow
+    Write-Host ("        'param sessionHostCountOverride = {0}' (a pilot setting). For all {1}, set it to -1" -f $override, $required) -ForegroundColor Yellow
+    Write-Host '        (and sessionHostStartIndex = 0), or add a set number with -AddHosts <n>.' -ForegroundColor Yellow
+}
 if ($skipped.Count) { Write-Host ('  Skipped      : {0} host(s) already exist - redeploy one with -HostNames {1}-nnn' -f $skipped.Count, $prefix) }
 $redeploy = @($planned | Where-Object { $existingNumbers -contains $_ })
 if ($redeploy.Count) {
