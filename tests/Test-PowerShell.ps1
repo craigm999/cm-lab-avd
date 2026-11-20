@@ -740,6 +740,14 @@ if ($env:OS -eq 'Windows_NT') {
         $line = ($infText -split "`r?`n") | Where-Object { $_ -match 'Policies\\System\\NoConnectedUser,' } | Select-Object -First 1
         $tok = if ("$line" -match '\|3\|%([^%]+)%') { $Matches[1] } elseif ("$line" -match ',3\|%([^%]+)%') { $Matches[1] } else { $null }
         $meaning = if ($tok -and ($infText -match "(?m)^\s*$([regex]::Escape($tok))\s*=\s*""?([^""\r\n]+)")) { $Matches[1] } else { "(not found: $line)" }
+        if ($meaning -like '@*') {
+            # Newer builds store a resource reference (e.g. @wsecedit.dll,-59153) - resolve it with Windows' own API.
+            if (-not ('AvdTest.Indirect' -as [type])) {
+                Add-Type -Namespace AvdTest -Name Indirect -MemberDefinition '[DllImport("shlwapi.dll", CharSet = CharSet.Unicode)] public static extern int SHLoadIndirectString(string src, System.Text.StringBuilder buf, int size, System.IntPtr reserved);'
+            }
+            $sb = New-Object System.Text.StringBuilder 1024
+            if ([AvdTest.Indirect]::SHLoadIndirectString($meaning, $sb, $sb.Capacity, [IntPtr]::Zero) -eq 0) { $meaning = $sb.ToString() }
+        }
         Assert-Equal ($meaning -match "can.t add or log on with Microsoft accounts") $true "dlp: NoConnectedUser=3 means '$meaning'"
     }
 
