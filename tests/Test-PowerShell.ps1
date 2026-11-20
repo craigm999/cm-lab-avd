@@ -611,6 +611,18 @@ try {
 catch { $failures.Add("Test-AvdUserAccess (guest) threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 $global:AzResponses = $null
 
+# Get-HostDataProtectionReport: pushes the host script and colours the report
+Write-Host "`n== Get-HostDataProtectionReport.ps1 (az mocked)" -ForegroundColor Cyan
+$global:AzResponses = [ordered]@{ 'vm run-command invoke*' = "[stdout]`n[OK] Personal Microsoft accounts blocked`n[FAIL] Tenant restrictions v2 NOT configured on this host" }
+$global:AzCalls.Clear(); $global:HostBuffer.Clear()
+try {
+    & (Join-Path $repo 'scripts/Get-HostDataProtectionReport.ps1') -VmName 'avdpd-005' -ResourceGroup 'rg-hosts'
+    Assert-Equal (($global:AzCalls -join "`n") -match 'vm run-command invoke --resource-group rg-hosts --name avdpd-005 --command-id RunPowerShellScript --scripts @\S+Test-DataProtectionHost\.ps1') $true 'dp report: host script pushed'
+    Assert-Equal ((($global:HostBuffer) -join "`n") -match '\[FAIL\] Tenant restrictions v2 NOT configured') $true 'dp report: findings shown'
+}
+catch { $failures.Add("Get-HostDataProtectionReport threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+$global:AzResponses = $null
+
 # Set-FslogixStorageAuth: adds privatelink identifierUris + cloud-group tag, consents, reports MFA policy
 Write-Host "`n== Set-FslogixStorageAuth.ps1 (az mocked)" -ForegroundColor Cyan
 $authScript = Join-Path $repo 'scripts/Set-FslogixStorageAuth.ps1'
@@ -797,6 +809,16 @@ if ($env:OS -eq 'Windows_NT') {
     $trBad = (& $custScript -ConfigBase64 ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($trCfg))) -DryRun 'True' -PolicyDefinitionsPath $pd | Out-String)
     Assert-Equal ($trBad -match "couldn't identify the Directory ID / Policy GUID fields") $true 'dlp TRv2: refuses to guess when fields are ambiguous'
     Remove-Item $pd -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Data protection host report: real run on Windows (nothing configured -> each gap flagged)
+if ($env:OS -eq 'Windows_NT') {
+    Write-Host "`n== Test-DataProtectionHost.ps1 (Windows, unconfigured machine)" -ForegroundColor Cyan
+    $dpReport = (& (Join-Path $repo 'infra/scripts/Test-DataProtectionHost.ps1') 2>&1 | Out-String)
+    Microsoft.PowerShell.Utility\Write-Host $dpReport
+    Assert-Equal ($dpReport -match '\[FAIL\] No customisation log') $true 'dp report: missing customisation flagged'
+    Assert-Equal ($dpReport -match '\[FAIL\] OneDrive AllowTenantList NOT set') $true 'dp report: missing OneDrive tenant restriction flagged'
+    Assert-Equal ($dpReport -match '\[FAIL\] Tenant restrictions v2 NOT configured') $true 'dp report: missing tenant restrictions flagged'
 }
 
 # Device redirection policy: every registry value the script writes is checked against

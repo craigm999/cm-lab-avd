@@ -91,6 +91,7 @@ scripts/
   Set-FslogixStorageAuth.ps1 # one-off Entra app setup for FSLogix (privatelink, consent, CA check)
   Get-FslogixHostDiagnostics.ps1 # read-only: why won't profiles load on this host?
   Publish-AvdPoolAutomation.ps1 # publishes the spares/tidy-up runbook (run by Deploy-Avd.ps1)
+  Get-HostDataProtectionReport.ps1 # read-only: which DLP settings are really in effect on a host
   deploy.sh                  # same, for macOS / Linux
   Enable-EntraSSO.ps1        # one-off tenant config for Entra SSO
 ```
@@ -373,6 +374,26 @@ Conditional Access in your tenant protects **your** resources. It can't stop som
 3. Push it with `Update-SessionHostConfig.ps1 -Customize -IncludeStopped`, then restart the hosts.
 
 Microsoft documents the Windows device option (*Tenant Restrictions → Cloud Policy Details*) as a Group Policy but **not its registry values**, and it is marked **preview**. So the script reads the policy definition that ships with the host's own Windows build. It finds the fields by their documented labels: *Microsoft Entra Directory ID*, *Policy GUID*, *Enable firewall protection of Microsoft endpoints*. It writes only those, and logs what it found. If it can't identify them unambiguously, it fails the step instead of guessing. Check `C:\ProgramData\AvdCustomization\customize.log` on the first host. `firewallProtection` adds the documented firewall enforcement for Microsoft endpoints; test it before turning it on widely.
+
+**"A guest could still sign in to their home-tenant OneDrive."** The tenant restrictions policy in Entra does nothing on its own. It's enforced only when the **device** tells the sign-in service which policy applies, and on these hosts that's the Windows policy the customisation writes. Check what's actually on a host. Run it while a test user is signed in:
+
+```powershell
+.\scripts\Get-HostDataProtectionReport.ps1 -ParameterFile .\infra\params\prod.bicepparam -VmName <host>
+```
+
+It shows:
+- whether the latest customisation (with `dataProtection`) ran, and whether a restart is pending;
+- the OneDrive allowed tenants;
+- the Tenant Restrictions values present, or none;
+- which tenant each signed-in user's OneDrive app is syncing.
+
+Usual causes:
+1. `tenantRestrictions.enabled` is still `false`, or there's no `policyId`.
+2. The host was never pushed the current `customizations.json`.
+3. No restart since the push.
+4. In Entra, only the *External applications* tab is set to Block. Microsoft says to block on **both** tabs (*External users and groups* too).
+
+OneDrive's `AllowTenantList` blocks syncing another organisation's OneDrive independently of tenant restrictions. If the report shows it set and OneDrive still syncs another tenant, restart OneDrive or sign the user out.
 
 **What this doesn't cover:**
 - **Other browsers.** Policies apply to Edge. Don't install other browsers, or apply equivalent policies to them.
