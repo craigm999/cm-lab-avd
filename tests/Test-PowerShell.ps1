@@ -874,7 +874,7 @@ try {
     & (Join-Path $repo 'scripts/Publish-AvdPoolAutomation.ps1') -ParameterFile $pubParams
     $calls = $global:AzCalls -join "`n"
     Assert-Equal ($calls -match 'ts create --name avd-sessionhost --version 1\.0 --resource-group rg-svc --location uksouth --template-file \S+sessionhost\.bicep') $true 'publish: session host template spec'
-    $rb = @($global:BodyLog | Where-Object { $_.Url -like '*/runbooks/AvdPoolMaintenance?*' })
+    $rb = @($global:BodyLog | Where-Object { $_.Url -match '/runbooks/AvdPoolMaintenance\?api-version' })   # -like '?' would also match '/draft'
     Assert-Equal ($rb.Count -eq 1 -and $rb[0].Body -match '"runbookType":\s*"PowerShell"') $true 'publish: runbook created (PowerShell 5.1 runtime)'
     $content = @($global:BodyLog | Where-Object { $_.Url -like '*/draft/content?*' })
     Assert-Equal ($content.Count -eq 1 -and $content[0].Line -match 'Content-Type=text/powershell' -and $content[0].Body -match 'AVD pool maintenance') $true 'publish: runbook content uploaded'
