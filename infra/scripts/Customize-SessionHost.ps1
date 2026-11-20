@@ -15,6 +15,9 @@
                  protection (+ optional network protection), firewall on, logon auditing
       redirection : device redirection policy (drives, printers, USB/PnP, COM/LPT, smart
                  cards, cameras blocked; clipboard, audio, microphone allowed by default)
+      dataProtection : block Microsoft (personal) accounts on Windows, OneDrive sync only
+                 for your tenant (no personal OneDrive), Edge sign-in pattern and URL block
+                 list, and optionally Entra Tenant Restrictions v2 (Windows policy)
       apps     : downloaded and installed silently - MSI or EXE, optional SHA-256 check,
                  optional detectPath to skip apps that are already installed,
                  fileName (URLs without a file name), files (inline config files written
@@ -26,7 +29,9 @@
 #>
 param(
     [string] $ConfigBase64 = '',
-    [string] $DryRun = 'False'
+    [string] $DryRun = 'False',
+    [string] $PolicyDefinitionsPath = "$env:WINDIR\PolicyDefinitions",
+    [string] $DefaultUserHive = 'C:\Users\Default\NTUSER.DAT'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -122,6 +127,101 @@ if ($null -ne $redir) {
         if (-not $dry) { Log ("  {0}: {1}" -f $p[0], $(if ($allowed) { 'allowed' } else { 'blocked' })) }
     }
     Log '  Applies to new sessions (users sign out and back in).'
+}
+
+# ---------------------------------------------------------------- Data protection
+function Set-DefaultUserReg([string] $SubKey, [string] $Name, $Value) {
+    # Per-user policies go into the default profile, so every NEW profile gets them.
+    if ($dry) { Log "  [dry-run] default user profile: $SubKey\$Name = $Value"; return }
+    $null = reg.exe load 'HKU\AvdDefaultUser' $DefaultUserHive
+    try {
+        $path = "Registry::HKEY_USERS\AvdDefaultUser\$SubKey"
+        if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+        New-ItemProperty -Path $path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
+    }
+    finally { [gc]::Collect(); [gc]::WaitForPendingFinalizers(); $null = reg.exe unload 'HKU\AvdDefaultUser' }
+}
+
+function Set-TenantRestrictionsPolicy([string] $Tenant, [string] $PolicyId, [bool] $Firewall) {
+    # Microsoft Learn documents this as a Group Policy ("Tenant Restrictions > Cloud Policy
+    # Details": Microsoft Entra Directory ID, Policy GUID, Enable firewall protection of
+    # Microsoft endpoints) but not its registry values. So read the policy definition that
+    # ships with THIS Windows build and write exactly what it describes.
+    $admxFile = Get-ChildItem -Path $PolicyDefinitionsPath -Filter *.admx -ErrorAction SilentlyContinue |
+        Where-Object { (Get-Content -Raw $_.FullName) -match 'TenantRestrictions' } | Select-Object -First 1
+    if (-not $admxFile) { Log '  Tenant restrictions: FAILED - no Tenant Restrictions policy definition on this Windows build'; $script:failures++; return }
+    [xml]$admx = Get-Content -Raw $admxFile.FullName
+    $pol = @($admx.policyDefinitions.policies.policy | Where-Object { $_.OuterXml -match 'TenantRestrictions' }) | Select-Object -First 1
+    if (-not $pol) { $pol = @($admx.policyDefinitions.policies.policy) | Select-Object -First 1 }
+    $labels = @{}
+    $adml = Join-Path (Join-Path $PolicyDefinitionsPath 'en-US') ($admxFile.BaseName + '.adml')
+    if (Test-Path $adml) {
+        [xml]$admlXml = Get-Content -Raw $adml
+        foreach ($pres in @($admlXml.policyDefinitionResources.resources.presentationTable.presentation)) {
+            foreach ($c in @($pres.ChildNodes)) { if ($c.refId) { $labels[$c.refId] = (("$($c.label)", "$($c.InnerText)") | Where-Object { $_ } | Select-Object -First 1) } }
+        }
+    }
+    $elements = @(foreach ($e in @($pol.elements.ChildNodes)) {
+        if ($e.NodeType -ne 'Element') { continue }
+        [pscustomobject]@{ Type = $e.LocalName; Id = "$($e.id)"; Label = "$($labels["$($e.id)"])"; Key = $(if ($e.key) { "$($e.key)" } else { "$($pol.key)" }); ValueName = "$($e.valueName)"; Node = $e }
+    })
+    foreach ($e in $elements) { Log ("  ADMX {0}: {1} '{2}' -> {3}\{4}" -f $e.Type, $e.Id, $e.Label, $e.Key, $e.ValueName) }
+    $tenantEl = @($elements | Where-Object { $_.Type -eq 'text' -and ($_.Label -match 'Directory ID' -or $_.Id -match 'TenantId|DirectoryId') })
+    $policyEl = @($elements | Where-Object { $_.Type -eq 'text' -and ($_.Label -match 'Policy GUID' -or $_.Id -match 'PolicyId|PolicyGuid') })
+    $fwEl = @($elements | Where-Object { $_.Type -eq 'boolean' -and ($_.Label -match 'firewall' -or $_.Id -match 'Firewall') })
+    if ($tenantEl.Count -ne 1 -or $policyEl.Count -ne 1) {
+        Log "  Tenant restrictions: FAILED - couldn't identify the Directory ID / Policy GUID fields unambiguously (see ADMX lines above)"
+        $script:failures++; return
+    }
+    if ($pol.valueName) {
+        $on = if ($pol.enabledValue -and $pol.enabledValue.decimal) { [int]$pol.enabledValue.decimal.value } else { 1 }
+        Set-Reg "HKLM:\$($pol.key)" "$($pol.valueName)" $on
+    }
+    Set-Reg "HKLM:\$($tenantEl[0].Key)" $tenantEl[0].ValueName $Tenant 'String'
+    Set-Reg "HKLM:\$($policyEl[0].Key)" $policyEl[0].ValueName $PolicyId 'String'
+    if ($fwEl.Count -eq 1) {
+        $n = $fwEl[0].Node
+        $data = if ($Firewall) { if ($n.trueValue -and $n.trueValue.decimal) { [int]$n.trueValue.decimal.value } else { 1 } } else { if ($n.falseValue -and $n.falseValue.decimal) { [int]$n.falseValue.decimal.value } else { 0 } }
+        Set-Reg "HKLM:\$($fwEl[0].Key)" $fwEl[0].ValueName $data
+    }
+    Log "  Tenant restrictions v2: tenant $Tenant, policy $PolicyId$(if ($Firewall) { ', firewall protection on' })"
+}
+
+$dp = Get-Prop $config 'dataProtection' $null
+if ($null -ne $dp) {
+    Log 'Data protection'
+    $tenant = [string](Get-Prop $dp 'tenantId' '')
+    if (-not $tenant) {
+        $line = @(dsregcmd.exe /status 2>$null) | Where-Object { $_ -match '^\s*TenantId\s*:' } | Select-Object -First 1
+        if ("$line" -match '([0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})') { $tenant = $Matches[1] }
+    }
+    if (-not $tenant -and $dry) { $tenant = '<this host''s tenant>' }
+
+    if (Get-Prop $dp 'blockMicrosoftAccounts' $false) {
+        # Accounts: Block Microsoft accounts = "Users can't add or log on with Microsoft accounts" (3)
+        Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'NoConnectedUser' 3
+    }
+    if (Get-Prop $dp 'oneDriveOnlyOwnTenant' $false) {
+        if (-not $tenant) { Log '  OneDrive: FAILED - tenant ID unknown (set dataProtection.tenantId)'; $script:failures++ }
+        else {
+            Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\OneDrive\AllowTenantList' $tenant $tenant 'String'   # sync only this organisation
+            Set-DefaultUserReg 'SOFTWARE\Policies\Microsoft\OneDrive' 'DisablePersonalSync' 1                # no personal OneDrive sync
+        }
+    }
+    $pattern = [string](Get-Prop $dp 'edgeSigninPattern' '')
+    if ($pattern) { Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'RestrictSigninToPattern' $pattern 'String' }
+    $urls = @(Get-Prop $dp 'blockedUrls' @() | Where-Object { $_ })
+    if ($urls.Count) {
+        $blk = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\URLBlocklist'
+        if (-not $dry -and (Test-Path $blk)) { Remove-Item -Path $blk -Recurse -Force }   # the list is replaced, not appended
+        for ($i = 0; $i -lt $urls.Count; $i++) { Set-Reg $blk ([string]($i + 1)) $urls[$i] 'String' }
+    }
+    $tr = Get-Prop $dp 'tenantRestrictions' $null
+    if (Get-Prop $tr 'enabled' $false) {
+        $trPolicy = [string](Get-Prop $tr 'policyId' '')
+        if (-not $trPolicy -or -not $tenant) { Log '  Tenant restrictions: FAILED - set dataProtection.tenantRestrictions.policyId (Entra > External Identities > Cross-tenant access settings > Default settings > Tenant restrictions)'; $script:failures++ }
+        else { Set-TenantRestrictionsPolicy $tenant $trPolicy ([bool](Get-Prop $tr 'firewallProtection' $false)) }
+    }
 }
 
 # ---------------------------------------------------------------- Applications

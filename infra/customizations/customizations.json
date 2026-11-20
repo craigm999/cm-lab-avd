@@ -39,5 +39,20 @@
     "microphone": true,
     "webAuthn": true
   },
+  "dataProtection": {
+    "_comment": "Stops data leaving via other tenants / personal accounts. tenantId empty = this host's own Entra tenant (from dsregcmd).",
+    "tenantId": "",
+    "blockMicrosoftAccounts": true,
+    "oneDriveOnlyOwnTenant": true,
+    "edgeSigninPattern": "",
+    "blockedUrls": [
+      "onedrive.live.com"
+    ],
+    "tenantRestrictions": {
+      "enabled": false,
+      "policyId": "",
+      "firewallProtection": false
+    }
+  },
   "apps": []
 }

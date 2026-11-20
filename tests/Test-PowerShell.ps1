@@ -715,22 +715,80 @@ if ($env:OS -eq 'Windows_NT') {
     catch { $failures.Add("Customize-SessionHost dry run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 }
 
-# DISCOVERY (informational): Tenant Restrictions v2 Group Policy definition on this Windows build
+# Data protection (Windows): dry run of the shipped settings, Microsoft-account value checked
+# against Windows' own security settings definitions, Tenant Restrictions reader against a
+# sample policy definition shaped like the documented one.
 if ($env:OS -eq 'Windows_NT') {
-    Write-Host "`n== DISCOVERY: Tenant Restrictions ADMX" -ForegroundColor Cyan
-    foreach ($f in Get-ChildItem (Join-Path $env:WINDIR 'PolicyDefinitions') -Filter *.admx) {
-        $raw = Get-Content -Raw $f.FullName
-        if ($raw -match 'TenantRestrictions|Tenant Restrictions') {
-            Microsoft.PowerShell.Utility\Write-Host "ADMX FILE: $($f.Name)"
-            [xml]$x = $raw
-            foreach ($pol in $x.policyDefinitions.policies.policy) {
-                if ($pol.OuterXml -match 'TenantRestrictions|Payload') { Microsoft.PowerShell.Utility\Write-Host ("POLICY: " + $pol.OuterXml) }
-            }
-        }
+    Write-Host "`n== Data protection (Windows)" -ForegroundColor Cyan
+    $custScript = Join-Path $repo 'infra/scripts/Customize-SessionHost.ps1'
+    $dpCfg = Get-Content -Raw (Join-Path $repo 'infra/customizations/customizations.json') | ConvertFrom-Json
+    $dpCfg.dataProtection.tenantId = '11111111-2222-3333-4444-555555555555'
+    $dpCfg.dataProtection.edgeSigninPattern = '.*@contoso\.com'
+    $b64dp = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($dpCfg | ConvertTo-Json -Depth 10)))
+    $dpOut = (& $custScript -ConfigBase64 $b64dp -DryRun 'True' | Out-String)
+    Assert-Equal ($dpOut -match 'Policies\\System\\NoConnectedUser = 3') $true 'dlp: Microsoft accounts blocked on Windows'
+    Assert-Equal ($dpOut -match 'OneDrive\\AllowTenantList\\11111111-2222-3333-4444-555555555555 = 11111111-2222-3333-4444-555555555555') $true 'dlp: OneDrive syncs only this tenant'
+    Assert-Equal ($dpOut -match 'default user profile: SOFTWARE\\Policies\\Microsoft\\OneDrive\\DisablePersonalSync = 1') $true 'dlp: personal OneDrive sync blocked for new profiles'
+    Assert-Equal ($dpOut -match 'Edge\\URLBlocklist\\1 = onedrive\.live\.com') $true 'dlp: consumer OneDrive web blocked in Edge'
+    Assert-Equal ($dpOut -match 'Edge\\RestrictSigninToPattern = \.\*@contoso') $true 'dlp: Edge sign-in restricted'
+    Assert-Equal ($dpOut -match 'Tenant restrictions') $false 'dlp: tenant restrictions off by default'
+
+    # NoConnectedUser = 3 means "Users can't add or log on with Microsoft accounts" (sceregvl.inf)
+    $inf = Join-Path $env:WINDIR 'inf\sceregvl.inf'
+    if (Test-Path $inf) {
+        $infText = Get-Content -Raw $inf
+        $line = ($infText -split "`r?`n") | Where-Object { $_ -match 'Policies\\System\\NoConnectedUser,' } | Select-Object -First 1
+        $tok = if ("$line" -match '\|3\|%([^%]+)%') { $Matches[1] } elseif ("$line" -match ',3\|%([^%]+)%') { $Matches[1] } else { $null }
+        $meaning = if ($tok -and ($infText -match "(?m)^\s*$([regex]::Escape($tok))\s*=\s*""?([^""\r\n]+)")) { $Matches[1] } else { "(not found: $line)" }
+        Assert-Equal ($meaning -match "can.t add or log on with Microsoft accounts") $true "dlp: NoConnectedUser=3 means '$meaning'"
     }
-    $sec = Get-ChildItem (Join-Path $env:WINDIR 'PolicyDefinitions') -Filter *.admx | Select-String -Pattern 'NoConnectedUser' -List
-    Microsoft.PowerShell.Utility\Write-Host ("NoConnectedUser in ADMX: " + (@($sec | ForEach-Object { $_.Filename }) -join ','))
-    Microsoft.PowerShell.Utility\Write-Host ("OS: " + (Get-CimInstance Win32_OperatingSystem).Caption + ' ' + [Environment]::OSVersion.Version)
+
+    # Tenant Restrictions v2: reader picks fields by their documented labels
+    $pd = Join-Path ([IO.Path]::GetTempPath()) ('pd-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path (Join-Path $pd 'en-US') -Force
+    Set-Content -Path (Join-Path $pd 'TenantRestrictions.admx') -Value @'
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitions xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions" revision="1.0" schemaVersion="1.0">
+  <policies>
+    <policy name="TrV2" class="Machine" displayName="$(string.TrV2)" key="SOFTWARE\Policies\Microsoft\Windows\TenantRestrictions\Payload" presentation="$(presentation.TrV2)">
+      <elements>
+        <text id="Elem1" valueName="Cloud" />
+        <text id="Elem2" valueName="TenantId" />
+        <text id="Elem3" valueName="PolicyId" />
+        <boolean id="Elem4" valueName="EnforceFw"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+      </elements>
+    </policy>
+  </policies>
+</policyDefinitions>
+'@
+    Set-Content -Path (Join-Path $pd 'en-US\TenantRestrictions.adml') -Value @'
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions" revision="1.0" schemaVersion="1.0">
+  <resources>
+    <stringTable><string id="TrV2">Cloud Policy Details</string></stringTable>
+    <presentationTable>
+      <presentation id="TrV2">
+        <textBox refId="Elem1"><label>Microsoft Entra cloud</label></textBox>
+        <textBox refId="Elem2"><label>Microsoft Entra Directory ID</label></textBox>
+        <textBox refId="Elem3"><label>Policy GUID</label></textBox>
+        <checkBox refId="Elem4">Enable firewall protection of Microsoft endpoints</checkBox>
+      </presentation>
+    </presentationTable>
+  </resources>
+</policyDefinitionResources>
+'@
+    $trCfg = '{"dataProtection":{"tenantId":"11111111-2222-3333-4444-555555555555","tenantRestrictions":{"enabled":true,"policyId":"99999999-8888-7777-6666-555555555555","firewallProtection":true}}}'
+    $trOut = (& $custScript -ConfigBase64 ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($trCfg))) -DryRun 'True' -PolicyDefinitionsPath $pd | Out-String)
+    Microsoft.PowerShell.Utility\Write-Host $trOut
+    Assert-Equal ($trOut -match 'TenantRestrictions\\Payload\\TenantId = 11111111-2222-3333-4444-555555555555') $true 'dlp TRv2: tenant ID written to the Directory ID field'
+    Assert-Equal ($trOut -match 'TenantRestrictions\\Payload\\PolicyId = 99999999-8888-7777-6666-555555555555') $true 'dlp TRv2: policy ID written to the Policy GUID field'
+    Assert-Equal ($trOut -match 'TenantRestrictions\\Payload\\EnforceFw = 1') $true 'dlp TRv2: firewall protection checkbox'
+    Assert-Equal ($trOut -match 'Payload\\Cloud =') $false 'dlp TRv2: unrelated fields left alone'
+    # labels missing -> refuses to guess
+    Set-Content -Path (Join-Path $pd 'en-US\TenantRestrictions.adml') -Value '<?xml version="1.0"?><policyDefinitionResources xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"><resources><presentationTable/></resources></policyDefinitionResources>'
+    $trBad = (& $custScript -ConfigBase64 ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($trCfg))) -DryRun 'True' -PolicyDefinitionsPath $pd | Out-String)
+    Assert-Equal ($trBad -match "couldn't identify the Directory ID / Policy GUID fields") $true 'dlp TRv2: refuses to guess when fields are ambiguous'
+    Remove-Item $pd -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # Device redirection policy: every registry value the script writes is checked against

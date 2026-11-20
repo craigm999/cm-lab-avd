@@ -347,6 +347,38 @@ Each setting is applied in **two places**, and Microsoft documents that the most
 
 Changes apply to **new sessions**, so users sign out and back in. The registry values the script writes are checked in CI against Windows' own `TerminalServer.admx`: right policy, right state.
 
+## Data protection: other tenants and personal accounts
+
+Conditional Access in your tenant protects **your** resources. It can't stop someone on the desktop signing in to **another** organisation's Microsoft 365, or a personal account, and uploading data there. These controls handle that on the session host. They live in the `dataProtection` block of [`customizations.json`](infra/customizations/customizations.json) and are applied by the same customisation step (new hosts at build; existing hosts with `Update-SessionHostConfig.ps1 -Customize`).
+
+| Setting | Default | Effect |
+|---|---|---|
+| `blockMicrosoftAccounts` | on | Windows *Accounts: Block Microsoft accounts* = users can't add or sign in with personal Microsoft accounts. Checked in CI against Windows' own definition. |
+| `oneDriveOnlyOwnTenant` | on | OneDrive syncs **only your organisation** (`AllowTenantList`), and **personal OneDrive sync is blocked** (`DisablePersonalSync`, set in the default user profile so every new profile gets it). |
+| `blockedUrls` | `onedrive.live.com` | Edge URL block list. Consumer OneDrive on the web isn't covered by Tenant Restrictions (Microsoft's documented workaround is blocking this site). Add other personal storage sites as needed, e.g. `dropbox.com`, `drive.google.com`, `wetransfer.com`. |
+| `edgeSigninPattern` | empty | Restrict Edge profile sign-in to your accounts, e.g. `.*@contoso\\.com`. This is a case-sensitive regex. |
+| `tenantRestrictions` | **off** | **Microsoft Entra Tenant Restrictions v2**: blocks sign-in to any tenant except yours (and personal Microsoft accounts) in Office apps, Edge and all sites in Edge, plus data-plane protection for SharePoint/OneDrive, Exchange and Graph. |
+| `tenantId` | empty | Empty = the host's own Entra tenant, read from `dsregcmd`. |
+
+**Turning on Tenant Restrictions v2:**
+1. In Entra: *External Identities → Cross-tenant access settings → Default settings → Tenant restrictions*.
+   - **Block** external users and applications (all tenants), and save.
+   - Copy the **Policy ID**.
+   - To use apps from a partner tenant, add that organisation and allow it there.
+   - Licensing: Entra ID P1. Permissions: Security Administrator.
+2. In `customizations.json`:
+   ```json
+   "tenantRestrictions": { "enabled": true, "policyId": "<Policy ID>", "firewallProtection": false }
+   ```
+3. Push it with `Update-SessionHostConfig.ps1 -Customize -IncludeStopped`, then restart the hosts.
+
+Microsoft documents the Windows device option (*Tenant Restrictions → Cloud Policy Details*) as a Group Policy but **not its registry values**, and it is marked **preview**. So the script reads the policy definition that ships with the host's own Windows build. It finds the fields by their documented labels: *Microsoft Entra Directory ID*, *Policy GUID*, *Enable firewall protection of Microsoft endpoints*. It writes only those, and logs what it found. If it can't identify them unambiguously, it fails the step instead of guessing. Check `C:\ProgramData\AvdCustomization\customize.log` on the first host. `firewallProtection` adds the documented firewall enforcement for Microsoft endpoints; test it before turning it on widely.
+
+**What this doesn't cover:**
+- **Other browsers.** Policies apply to Edge. Don't install other browsers, or apply equivalent policies to them.
+- **Your own tenant's data leaving through allowed channels**, such as the clipboard (still allowed) or email. Microsoft Purview DLP (endpoint DLP) covers that, with onboarding and E5-level licensing.
+- **Screenshots and photos of the screen.** AVD has *screen capture protection* and *watermarking* for this; they can be added the same way if you want them.
+
 ## Custom images
 
 `imageReference` takes either a marketplace image or an **Azure Compute Gallery** image. Microsoft recommends the gallery for production, for replication and versioning.
