@@ -497,7 +497,7 @@ $tlDef = '{"gen":"V2","state":"Generalized","features":[{"name":"SecurityType","
 function Invoke-ImageCheck([string] $Def, [string] $Versions) {
     $global:AzResponses = [ordered]@{ 'sig image-definition show*' = $Def; 'sig image-version list*' = $Versions }
     $global:HostBuffer.Clear()
-    try { & $deployScript -ParameterFile $imgParams -WhatIf; return '' } catch { return "$_" }
+    try { $null = & $deployScript -ParameterFile $imgParams -WhatIf; return '' } catch { return "$_" }
 }
 $r1 = Invoke-ImageCheck $tlDef '[{"name":"1.0.0","regions":["UK South"],"exclude":false,"state":"Succeeded"},{"name":"1.1.0","regions":["West Europe"],"exclude":false,"state":"Succeeded"}]'
 Assert-Equal ($r1 -match 'Custom image problem') $true 'image: latest version not replicated to the region is caught'

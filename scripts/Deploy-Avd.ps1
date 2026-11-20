@@ -342,7 +342,8 @@ if ($paramText -match "(?s)imageReference\s*=\s*\{\s*id:\s*'([^']+)'") {
         if ($vl.Ok -and $vl.Output) {
             $parsedVersions = $vl.Output | ConvertFrom-Json
             $versions = @(foreach ($v in $parsedVersions) { $v })
-            $pick = if ($version) { @($versions | Where-Object { $_.name -eq $version }) } else { @($versions | Where-Object { -not $_.exclude -and $_.state -eq 'Succeeded' } | Sort-Object { [version]("$($_.name)") } | Select-Object -Last 1) }
+            # Wrap the whole if in @(): a single PSCustomObject has no .Count in Windows PowerShell 5.1.
+            $pick = @(if ($version) { $versions | Where-Object { $_.name -eq $version } } else { $versions | Where-Object { -not $_.exclude -and $_.state -eq 'Succeeded' } | Sort-Object { [version]("$($_.name)") } | Select-Object -Last 1 })
             if (-not $pick.Count) { $imgProblems += $(if ($version) { "Image version $version not found." } else { 'No usable image version (all excluded from latest or not Succeeded).' }) }
             else {
                 $regions = @(foreach ($r in $pick[0].regions) { ("$r" -replace '\s', '').ToLowerInvariant() })

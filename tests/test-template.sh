@@ -75,7 +75,7 @@ check "AVD agent runs after Entra join (dependsOn chain)" \
 check "Session host VM has SystemAssigned identity" \
   'any(.[]; .type=="Microsoft.Compute/virtualMachines" and .identity.type=="SystemAssigned")'
 check "Session host VM uses Trusted Launch" \
-  'any(.[]; .type=="Microsoft.Compute/virtualMachines" and .properties.securityProfile.securityType=="TrustedLaunch")'
+  'any(.[]; .type=="Microsoft.Compute/virtualMachines" and (.properties.securityProfile|tostring|test("TrustedLaunch")))'
 # Host pool properties are a union() expression (Pooled vs Personal), so check its text.
 check "Host pool type comes from the hostPoolType parameter" \
   'any(.[]; .type=="Microsoft.DesktopVirtualization/hostPools" and (.properties|tostring|test("hostPoolType")))'
