@@ -12,15 +12,22 @@
       $env:AVD_LOCAL_ADMIN_PASSWORD is already set. The password is only placed in this
       process's environment for the duration of the run and removed afterwards.
     * Registers the required resource providers if they are not registered.
-    * -WhatIf runs `az deployment sub what-if`; otherwise you are asked to confirm before
-      `az deployment sub create` (skip with -Force).
-    * Updating an existing deployment:
-        -AddHosts N   finds the highest existing host number (e.g. avdsh-100) and deploys
-                      N new hosts after it (avdsh-101...). Existing hosts are not touched.
-        -InfraOnly    deploys everything except session hosts (host pool settings, scaling
-                      plan, FSLogix storage, network, RBAC). Existing hosts are not touched.
-      Without either, the script warns if the run would redeploy hosts that already exist
-      (which re-runs their extensions and fails on hosts autoscale has stopped).
+    * Two stages:
+        1. Shared resources (host pool, workspace, storage, network, RBAC...) in one
+           subscription deployment, run with sessionHostCountOverride = 0.
+        2. Session hosts: infra/modules/sessionhost.bicep is published as the template spec
+           avd-sessionhost (1.0) and each host gets its own small deployment from it,
+           -ThrottleLimit (default 20) at a time. Putting hundreds of hosts in one deployment
+           fails with DeploymentSizeExceeded (4 MB), because ARM repeats the host template,
+           scripts included, for every host. This way there is no batch limit.
+    * -WhatIf runs `az deployment sub what-if` for the shared resources and lists the hosts
+      it would add; otherwise you are asked to confirm first (skip with -Force).
+    * Which hosts:
+        (default)     every host the parameter file describes that doesn't exist yet.
+                      Existing hosts are skipped, never redeployed.
+        -AddHosts N   N new hosts after the highest existing number (avdsh-101...).
+        -HostNames    exactly these hosts, e.g. ones that failed (avdsh-021,avdsh-030).
+        -InfraOnly    shared resources only.
     * Saves the deployment outputs to <param file name>.outputs.json next to the parameter
       file (used by Update-SessionHostConfig.ps1).
 
@@ -31,6 +38,10 @@
 
 .EXAMPLE
     .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam
+
+.EXAMPLE
+    # Retry two hosts that failed
+    .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -HostNames avdsh-021,avdsh-030
 
 .EXAMPLE
     # Add 20 more session hosts after the existing ones
@@ -51,16 +62,21 @@ param(
 
     [string] $DeploymentName = ('avd-' + (Get-Date -Format 'yyyyMMddHHmmss')),
 
-    [ValidateRange(0, 1000)]
+    [ValidateRange(0, 5000)]
     [int] $AddHosts = 0,
 
+    [string[]] $HostNames,
+
     [switch] $InfraOnly,
+
+    [ValidateRange(1, 100)]
+    [int] $ThrottleLimit = 20,
 
     [switch] $Force
 )
 
 $ErrorActionPreference = 'Stop'
-if ($AddHosts -gt 0 -and $InfraOnly) { throw 'Use either -AddHosts or -InfraOnly, not both.' }
+if ((@(($AddHosts -gt 0), [bool]$InfraOnly, [bool]$HostNames) | Where-Object { $_ }).Count -gt 1) { throw 'Use only one of -AddHosts, -HostNames and -InfraOnly.' }
 $preview = [bool]$WhatIfPreference
 # Our own calls must not be suppressed by -WhatIf; we branch on $preview instead.
 $WhatIfPreference = $false
@@ -134,6 +150,11 @@ Write-Host ('  Mode         : {0}' -f $(if ($preview) { 'what-if (preview, no ch
 Write-Host ''
 
 # ------------------------------------------------------------------ Session host plan
+# Hosts are NOT part of the main (subscription) deployment. That deployment always runs
+# with sessionHostCountOverride = 0, and each host is then deployed on its own from a template
+# spec. A copy loop in one deployment repeats the whole session host template (scripts and
+# customisation settings included) per host, which hits ARM's 4 MB DeploymentSizeExceeded
+# limit at around 50-100 hosts, so per-host deployments have no batch size limit.
 $paramDir = Split-Path -Parent $ParameterFile
 $paramBase = [IO.Path]::GetFileNameWithoutExtension($ParameterFile)
 $outputsFile = Join-Path $paramDir "$paramBase.outputs.json"
@@ -166,53 +187,41 @@ $override = [int](Get-ParamValue $paramText 'sessionHostCountOverride' '-1')
 $personalPool = (Get-ParamValue $paramText 'hostPoolType' 'Pooled') -eq 'Personal'
 $count = if ($override -ge 0) { $override } elseif ($personalPool) { $users } else { [int][math]::Ceiling($users / $perHost) }
 
-$deployParamFile = $ParameterFile
-$tempParamFile = $null
-if ($InfraOnly -or $AddHosts -gt 0) {
-    if ($InfraOnly) { $start = 0; $count = 0 } else { $start = $highest; $count = $AddHosts }
-    $newText = Set-ParamValue $paramText 'sessionHostStartIndex' $start
-    $newText = Set-ParamValue $newText 'sessionHostCountOverride' $count
-    # Must sit beside the original so its relative `using` path still resolves.
-    $tempParamFile = Join-Path $paramDir "$paramBase.deploy-tmp.bicepparam"
-    [IO.File]::WriteAllText($tempParamFile, $newText, (New-Object System.Text.UTF8Encoding($false)))
-    $deployParamFile = $tempParamFile
+$skipped = @()
+if ($InfraOnly) { $planned = @() }
+elseif ($HostNames) {
+    $planned = @(foreach ($h in $HostNames) {
+            if ("$h" -match ('^' + [regex]::Escape($prefix) + '-(\d+)$')) { [int]$Matches[1] }
+            else { throw "Host name '$h' does not match the prefix in the parameter file ($prefix-nnn)." }
+        })
 }
-
-$planned = @(); for ($i = $start; $i -lt $start + $count; $i++) { $planned += ($i + 1) }
-$overlap = @($planned | Where-Object { $existingNumbers -contains $_ })
-Write-Host ('  Hosts RG     : {0} ({1} existing {2}-nnn host(s){3})' -f $hostsRg, $existingNumbers.Count, $prefix, $(if ($highest) { ", highest $prefix-{0:D3}" -f $highest } else { '' }))
-if ($count -gt 0) {
-    Write-Host ('  This run     : session hosts {0}-{1:D3} to {0}-{2:D3} ({3})' -f $prefix, $planned[0], $planned[-1], $count)
-}
+elseif ($AddHosts -gt 0) { $planned = @(for ($i = 1; $i -le $AddHosts; $i++) { $highest + $i }) }
 else {
-    Write-Host '  This run     : no session hosts (shared resources only)'
+    # Plain run: every host the parameter file describes that does not exist yet.
+    $all = @(for ($i = $start; $i -lt $start + $count; $i++) { $i + 1 })
+    $planned = @($all | Where-Object { $existingNumbers -notcontains $_ })
+    $skipped = @($all | Where-Object { $existingNumbers -contains $_ })
+}
+$plannedNames = @($planned | ForEach-Object { '{0}-{1:D3}' -f $prefix, $_ })
+
+# The main deployment never contains hosts. Must sit beside the original so its relative
+# `using` path still resolves.
+$tempParamFile = Join-Path $paramDir "$paramBase.deploy-tmp.bicepparam"
+[IO.File]::WriteAllText($tempParamFile, (Set-ParamValue $paramText 'sessionHostCountOverride' 0), (New-Object System.Text.UTF8Encoding($false)))
+$deployParamFile = $tempParamFile
+
+Write-Host ('  Hosts RG     : {0} ({1} existing {2}-nnn host(s){3})' -f $hostsRg, $existingNumbers.Count, $prefix, $(if ($highest) { ", highest $prefix-{0:D3}" -f $highest } else { '' }))
+if ($planned.Count -eq 1) { Write-Host ('  This run     : session host {0}' -f $plannedNames[0]) }
+elseif ($planned.Count -gt 1) {
+    Write-Host ('  This run     : {0} session hosts, {1} to {2}, {3} at a time' -f $planned.Count, $plannedNames[0], $plannedNames[-1], $ThrottleLimit)
+}
+else { Write-Host '  This run     : no new session hosts (shared resources only)' }
+if ($skipped.Count) { Write-Host ('  Skipped      : {0} host(s) already exist - redeploy one with -HostNames {1}-nnn' -f $skipped.Count, $prefix) }
+$redeploy = @($planned | Where-Object { $existingNumbers -contains $_ })
+if ($redeploy.Count) {
+    Write-Host ("  Redeploying  : {0} existing host(s). Start any stopped by autoscale first, or their extensions fail." -f $redeploy.Count) -ForegroundColor Yellow
 }
 Write-Host ''
-
-# ARM allows at most 800 resources per deployment; each host is one nested deployment.
-$maxHostsPerRun = 400
-if ($count -gt $maxHostsPerRun) {
-    Write-Host ("This run would deploy {0} hosts. One deployment can create at most about {1} reliably" -f $count, $maxHostsPerRun) -ForegroundColor Yellow
-    Write-Host '(ARM limit: 800 resources per deployment). Deploy in batches instead, e.g.:' -ForegroundColor Yellow
-    Write-Host "  .\scripts\Deploy-Avd.ps1 -ParameterFile $ParameterFile -AddHosts $maxHostsPerRun    (repeat until done)"
-    if ($tempParamFile) { Remove-Item -LiteralPath $tempParamFile -ErrorAction SilentlyContinue }
-    throw "Too many hosts for one run ($count)."
-}
-
-if ($overlap.Count) {
-    Write-Host ("WARNING: this run would redeploy {0} host(s) that already exist ({1}-{2:D3} to {1}-{3:D3})." -f $overlap.Count, $prefix, $overlap[0], $overlap[-1]) -ForegroundColor Yellow
-    Write-Host '  Their extensions would re-run with a new registration token, and the run fails on any host' -ForegroundColor Yellow
-    Write-Host '  autoscale has stopped. To add hosts use -AddHosts <n>; to change shared settings use -InfraOnly.' -ForegroundColor Yellow
-    Write-Host ''
-    if (-not $preview -and -not $Force) {
-        $answer = Read-Host 'Type redeploy to continue anyway'
-        if ($answer -ne 'redeploy') {
-            if ($tempParamFile) { Remove-Item -LiteralPath $tempParamFile -ErrorAction SilentlyContinue }
-            Write-Host 'Cancelled.' -ForegroundColor Yellow
-            return
-        }
-    }
-}
 
 # ------------------------------------------------------------------ Private DNS pre-flight
 # A VNet can be linked to only ONE privatelink.file.* zone. With privateDnsZoneMode = 'new' the
@@ -392,10 +401,13 @@ try {
         '--template-file', $template, '--parameters', $deployParamFile, '--only-show-errors')
 
     if ($preview) {
-        Write-Step 'Running what-if (no changes will be made)'
+        Write-Step 'Running what-if for the shared resources (no changes will be made)'
         & az deployment sub what-if @common
         if ($LASTEXITCODE -ne 0) { throw 'what-if failed - see the error above.' }
         Write-Host ''
+        if ($planned.Count) {
+            Write-Host ("Then {0} session host(s) would be deployed, one deployment each: {1}" -f $planned.Count, $(if ($planned.Count -le 6) { $plannedNames -join ', ' } else { "$($plannedNames[0]) ... $($plannedNames[-1])" }))
+        }
         Write-Host 'Preview complete. Run again without -WhatIf to deploy.' -ForegroundColor Green
         return
     }
@@ -405,7 +417,7 @@ try {
         if ($answer -ne 'yes') { Write-Host 'Cancelled.' -ForegroundColor Yellow; return }
     }
 
-    Write-Step "Deploying ($DeploymentName) - a full 100-host run takes roughly 45-90 minutes"
+    Write-Step "Deploying shared resources ($DeploymentName) - usually 5-15 minutes"
     $result = & az deployment sub create @common --query 'properties.outputs' -o json
     if ($LASTEXITCODE -ne 0) {
         throw "Deployment failed. Details: az deployment sub show --name $DeploymentName  (or the subscription's Deployments blade in the portal)."
@@ -415,10 +427,11 @@ try {
     $outputs = $outputsJson | ConvertFrom-Json
     [IO.File]::WriteAllText($outputsFile, $outputsJson, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host ''
-    Write-Host 'Deployment succeeded.' -ForegroundColor Green
+    Write-Host 'Shared resources deployed.' -ForegroundColor Green
     foreach ($p in $outputs.PSObject.Properties) {
         $v = $p.Value.value
         if ($v -is [array]) { $v = $v -join ', ' }
+        if ($v -is [System.Management.Automation.PSCustomObject]) { continue }
         Write-Host ('  {0,-28} {1}' -f $p.Name, $v)
     }
     Write-Host ''
@@ -445,6 +458,89 @@ try {
             else { Write-Host "Could not set the desktop name - set it with: Update-AzWvdDesktop -ResourceGroupName <rg> -ApplicationGroupName <app group> -Name $deskName -FriendlyName '$friendly'" -ForegroundColor Yellow }
         }
         finally { Remove-Item -LiteralPath $tmpBody -ErrorAction SilentlyContinue }
+    }
+
+    # -------------------------------------------------------------- Session hosts
+    if ($planned.Count) {
+        $shd = if ($outputs.PSObject.Properties['sessionHostDeployment']) { $outputs.sessionHostDeployment.value } else { $null }
+        if (-not $shd) { throw 'The deployment returned no sessionHostDeployment output - is infra/main.bicep up to date?' }
+        $hostsRg = "$($shd.hostsResourceGroup)"
+        $zones = @($shd.zones | Where-Object { $_ })
+
+        Write-Step "Publishing the session host template spec (avd-sessionhost 1.0 in $($shd.serviceResourceGroup))"
+        $shTemplate = Join-Path (Join-Path (Join-Path $repoRoot 'infra') 'modules') 'sessionhost.bicep'
+        $null = Invoke-Az ts create --name avd-sessionhost --version '1.0' --resource-group "$($shd.serviceResourceGroup)" --location "$($shd.location)" --template-file $shTemplate --description 'AVD session host (Deploy-Avd.ps1 and the pool maintenance runbook)' --yes --only-show-errors
+        $tsId = (Invoke-Az ts show --name avd-sessionhost --version '1.0' --resource-group "$($shd.serviceResourceGroup)" --query id -o tsv --only-show-errors).Trim()
+
+        # One registration token for the whole run, valid long enough for every wave
+        # (about 90 minutes per wave of $ThrottleLimit hosts, plus margin; Azure allows up to 30 days).
+        # Each host reads the token when its deployment starts, so it is set once, before any host.
+        $waves = [math]::Ceiling($planned.Count / $ThrottleLimit)
+        $tokenHours = [math]::Min(27 * 24, [math]::Max(8, $waves * 1.5 + 2))
+        $expiry = (Get-Date).ToUniversalTime().AddHours($tokenHours).ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $tokenBody = [IO.Path]::GetTempFileName()
+        try {
+            [IO.File]::WriteAllText($tokenBody, (@{ properties = @{ registrationInfo = @{ expirationTime = $expiry; registrationTokenOperation = 'Update' } } } | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
+            $null = Invoke-Az rest --method patch --url "https://management.azure.com$($shd.hostPoolId)?api-version=2024-04-03" --headers 'Content-Type=application/json' --body "@$tokenBody" --only-show-errors
+        }
+        finally { Remove-Item -LiteralPath $tokenBody -ErrorAction SilentlyContinue }
+        Write-Host "  registration token valid until $expiry"
+
+        Write-Step ("Deploying {0} session host(s), {1} at a time - each takes about 30-60 minutes" -f $planned.Count, $ThrottleLimit)
+        Write-Host '  Closing this window does not stop deployments already started; re-run to pick up the rest.'
+        $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmm')
+        $queue = New-Object System.Collections.Generic.Queue[int]
+        foreach ($n in $planned) { $queue.Enqueue($n) }
+        $running = @{}    # deployment name -> vm name
+        $succeeded = New-Object System.Collections.Generic.List[string]
+        $failed = New-Object System.Collections.Generic.List[string]
+        $pollSeconds = if ($env:AVD_DEPLOY_POLL_SECONDS) { [int]$env:AVD_DEPLOY_POLL_SECONDS } else { 60 }
+
+        while ($queue.Count -or $running.Count) {
+            while ($queue.Count -and $running.Count -lt $ThrottleLimit) {
+                $num = $queue.Dequeue()
+                $vm = '{0}-{1:D3}' -f $prefix, $num
+                $depName = "avd-host-$vm-$stamp"
+                $hp = [ordered]@{}
+                foreach ($p in $shd.sessionHostParameters.PSObject.Properties) { $hp[$p.Name] = @{ value = $p.Value } }
+                $hp['vmName'] = @{ value = $vm }
+                $hp['zone'] = @{ value = $(if ($zones.Count) { "$($zones[($num - 1) % $zones.Count])" } else { '' }) }
+                $hp['adminPassword'] = @{ value = $env:AVD_LOCAL_ADMIN_PASSWORD }
+                # Holds the password: written, handed to az, deleted straight away.
+                $hpFile = [IO.Path]::GetTempFileName()
+                try {
+                    [IO.File]::WriteAllText($hpFile, (@{ '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion = '1.0.0.0'; parameters = $hp } | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
+                    $began = Test-Az deployment group create --resource-group $hostsRg --name $depName --template-spec $tsId --parameters "@$hpFile" --no-wait --only-show-errors
+                }
+                finally { Remove-Item -LiteralPath $hpFile -ErrorAction SilentlyContinue }
+                if ($began.Ok) { $running[$depName] = $vm; Write-Host "  started $vm" }
+                else { $failed.Add($vm); Write-Host "  FAILED to start $vm (az deployment group create refused it - check quota and the hosts resource group)" -ForegroundColor Red }
+            }
+            if (-not $running.Count) { break }
+            if ($pollSeconds) { Start-Sleep -Seconds $pollSeconds }
+            $st = Test-Az deployment group list --resource-group $hostsRg --query "[?starts_with(name, 'avd-host-')].{n:name, s:properties.provisioningState}" -o json --only-show-errors
+            if (-not $st.Ok -or -not $st.Output) { continue }
+            $states = $st.Output | ConvertFrom-Json
+            foreach ($d in $states) {
+                if (-not $running.ContainsKey("$($d.n)")) { continue }
+                $vm = $running["$($d.n)"]
+                if ($d.s -eq 'Succeeded') { $succeeded.Add($vm); $running.Remove("$($d.n)"); Write-Host "  done    $vm" -ForegroundColor Green }
+                elseif ($d.s -in 'Failed', 'Canceled') {
+                    $failed.Add($vm); $running.Remove("$($d.n)")
+                    Write-Host "  FAILED  $vm - details: az deployment group show -g $hostsRg -n $($d.n) --query properties.error" -ForegroundColor Red
+                }
+            }
+            Write-Host ("  {0:HH:mm}  {1} done, {2} failed, {3} running, {4} queued" -f (Get-Date), $succeeded.Count, $failed.Count, $running.Count, $queue.Count)
+        }
+
+        Write-Host ''
+        Write-Host ("Session hosts: {0} deployed, {1} failed." -f $succeeded.Count, $failed.Count) -ForegroundColor $(if ($failed.Count) { 'Yellow' } else { 'Green' })
+        if ($failed.Count) {
+            $failedNames = @($failed | Sort-Object)
+            Write-Host 'Fix the cause (quota, subnet IPs, image), then retry just those hosts:' -ForegroundColor Yellow
+            Write-Host ("  .\scripts\Deploy-Avd.ps1 -ParameterFile $ParameterFile -HostNames {0}" -f ($failedNames -join ','))
+            throw "$($failed.Count) session host(s) failed."
+        }
     }
     Write-Host 'Next: the post-deployment steps in README.md (storage admin consent, CA exclusion, NTFS permissions).'
 }

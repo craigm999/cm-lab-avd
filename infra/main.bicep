@@ -610,8 +610,8 @@ module automationLawRole 'modules/law-role.bicep' = if (deployAutomation) {
   ]
 }
 
-// Everything the runbook passes to the session host template spec for a new desktop
-// (vmName, zone and adminPassword are added by the runbook).
+// Everything Deploy-Avd.ps1 and the runbook pass to the session host template spec for a
+// new host (vmName, zone and adminPassword are added by the caller).
 var automationSessionHostParameters = {
   location: location
   vmSize: vmSize
@@ -633,6 +633,9 @@ var automationSessionHostParameters = {
   tags: allTags
 }
 
+// Used only when hosts are deployed by this template directly (deploy.sh, or a plain
+// `az deployment sub create`). Deploy-Avd.ps1 sets sessionHostCountOverride = 0 and deploys
+// hosts itself. Each host repeats the full template, so keep these runs to ~50 hosts.
 // Deploy hosts 20 at a time to stay well inside ARM / Compute API throttling limits.
 @batchSize(20)
 module sessionHosts 'modules/sessionhost.bicep' = [
@@ -689,6 +692,18 @@ output sessionHostSubnetId string = sessionHostSubnetId
 output fslogixStorageAccountName string = deployFslogixStorage ? fslogixStorage!.outputs.storageAccountName : ''
 output fslogixUncPath string = deployFslogixStorage ? fslogixStorage!.outputs.fslogixUncPath : ''
 output fslogixNetworkAccess string = deployFslogixStorage ? fslogixNetworkAccess : ''
+// Used by Deploy-Avd.ps1, which deploys hosts one per deployment from a template spec. That
+// keeps every deployment small: the copy loop below repeats the whole session host
+// template, scripts included, per host and hits ARM's 4 MB DeploymentSizeExceeded limit.
+output sessionHostDeployment object = {
+  hostPoolId: hostPool.outputs.hostPoolId
+  hostsResourceGroup: rgHostsName
+  serviceResourceGroup: rgServiceName
+  location: location
+  sessionHostPrefix: sessionHostNamePrefix
+  zones: availabilityZones
+  sessionHostParameters: automationSessionHostParameters
+}
 output automationAccountName string = deployAutomation ? automation!.outputs.name : ''
 output automationResourceGroup string = deployAutomation ? rgServiceName : ''
 output automationConfig object = deployAutomation

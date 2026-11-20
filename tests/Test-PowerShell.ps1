@@ -234,6 +234,13 @@ $global:MockGraph = $false
 $global:MockDnsLinks = '[]'
 $global:MockZoneList = '[]'
 $global:MockZoneLinks = '[]'
+$global:HostDeploys = [System.Collections.Generic.List[object]]::new()
+$global:FailHosts = @()
+$env:AVD_DEPLOY_POLL_SECONDS = '0'
+$hostPoolIdT = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-svc/providers/Microsoft.DesktopVirtualization/hostPools/vdpool-x'
+$global:MockSubCreate = '{"hostPoolName":{"type":"String","value":"vdpool-avd-prod-uksouth"},"resourceGroupsCreated":{"type":"Array","value":["rg-a","rg-b"]},' +
+    '"sessionHostDeployment":{"type":"Object","value":{"hostPoolId":"' + $hostPoolIdT + '","hostsResourceGroup":"rg-hosts","serviceResourceGroup":"rg-svc","location":"uksouth","sessionHostPrefix":"avdsh","zones":["1","2","3"],' +
+    '"sessionHostParameters":{"location":"uksouth","vmSize":"Standard_D4s_v5","imageReference":{"publisher":"MicrosoftWindowsDesktop"},"customizationConfig":{"apps":[],"dataProtection":{"blockedUrls":["onedrive.live.com"]}}}}}}'
 function global:az {
     $line = ($args | ForEach-Object { "$_" }) -join ' '
     $global:AzCalls.Add($line)
@@ -242,6 +249,13 @@ function global:az {
         $global:PasswordSeenByAz = $env:AVD_LOCAL_ADMIN_PASSWORD
         $i = [array]::IndexOf([string[]]$args, '--parameters')
         if ($i -ge 0) { $global:DeployParamText = Get-Content -Raw -LiteralPath $args[$i + 1] }
+    }
+    if ($line -like 'deployment group create*') {
+        $ni = [array]::IndexOf([string[]]$args, '--name'); $pi = [array]::IndexOf([string[]]$args, '--parameters')
+        $global:HostDeploys.Add([pscustomobject]@{ Name = "$($args[$ni + 1])"; File = "$($args[$pi + 1])".TrimStart('@'); Params = (Get-Content -Raw -LiteralPath ("$($args[$pi + 1])".TrimStart('@')) | ConvertFrom-Json).parameters })
+    }
+    if ($line -like 'deployment group list*') {
+        return (ConvertTo-Json -Depth 3 @($global:HostDeploys | ForEach-Object { @{ n = $_.Name; s = $(if ($global:FailHosts -contains $_.Params.vmName.value) { 'Failed' } else { 'Succeeded' }) } }))
     }
     $bi2 = [array]::IndexOf([string[]]$args, '--body')
     $ui2 = [array]::IndexOf([string[]]$args, '--url')
@@ -274,7 +288,8 @@ function global:az {
         'bicep version*'        { return 'Bicep CLI version 0.49.2' }
         'provider show*'        { return 'Registered' }
         'deployment sub what-if*' { return 'Resource changes: 120 to create.' }
-        'deployment sub create*'  { return '{"hostPoolName":{"type":"String","value":"vdpool-avd-prod-uksouth"},"resourceGroupsCreated":{"type":"Array","value":["rg-a","rg-b"]}}' }
+        'deployment sub create*'  { return $global:MockSubCreate }
+        'ts show*'                { return '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-svc/providers/Microsoft.Resources/templateSpecs/avd-sessionhost/versions/1.0' }
         default { return '' }
     }
 }
@@ -289,7 +304,10 @@ try {
     & $deployScript -ParameterFile $exampleParams -WhatIf
     $calls = $global:AzCalls -join "`n"
     Assert-Equal ($calls -match 'account set --subscription 00000000-0000-0000-0000-000000000000') $true 'deploy: subscription taken from param file header'
-    Assert-Equal ($calls -match 'deployment sub what-if --name avd-\d+ --location uksouth --template-file \S+main\.bicep --parameters \S+main\.bicepparam') $true 'deploy: what-if command'
+    Assert-Equal ($calls -match 'deployment sub what-if --name avd-\d+ --location uksouth --template-file \S+main\.bicep --parameters \S+main\.deploy-tmp\.bicepparam') $true 'deploy: what-if command'
+    Assert-Equal ($global:DeployParamText -match '(?m)^param sessionHostCountOverride = 0\s*$') $true 'deploy: main deployment carries no hosts'
+    Assert-Equal ((($global:HostBuffer) -join "`n") -match 'Then 100 session host\(s\) would be deployed') $true 'deploy -WhatIf: lists the hosts it would add'
+    Assert-Equal $global:HostDeploys.Count 0 'deploy -WhatIf: no host deployments'
     Assert-Equal ($calls -match 'deployment sub create') $false 'deploy: -WhatIf does not create'
     Assert-Equal $global:PasswordSeenByAz 'Pilot-Passw0rd!x' 'deploy: prompted password passed to az'
     Assert-Equal ([bool]$env:AVD_LOCAL_ADMIN_PASSWORD) $false 'deploy: password cleared afterwards'
@@ -305,39 +323,69 @@ try {
     Assert-Equal ($calls -match 'deployment sub create --name avd-ci --location uksouth') $true 'deploy: create command'
     Assert-Equal ($calls -match 'deployment sub what-if') $false 'deploy: create does not run what-if'
     Assert-Equal $env:AVD_LOCAL_ADMIN_PASSWORD 'From-Env-Passw0rd!' 'deploy: existing env password left in place'
+    Assert-Equal ($calls -match "ts create --name avd-sessionhost --version 1\.0 --resource-group rg-svc --location uksouth --template-file \S+sessionhost\.bicep") $true 'deploy: session host template spec published'
+    Assert-Equal ($calls -match ('rest --method patch --url https://management\.azure\.com' + [regex]::Escape($hostPoolIdT) + '\?api-version')) $true 'deploy: registration token refreshed'
+    Assert-Equal $global:HostDeploys.Count 100 'deploy: one deployment per host (100)'
+    $h7 = $global:HostDeploys | Where-Object { $_.Params.vmName.value -eq 'avdsh-007' }
+    Assert-Equal "$($h7.Params.zone.value)" '1' 'deploy: zone round-robin (host 7 -> zone 1)'
+    Assert-Equal "$($h7.Params.adminPassword.value)" 'From-Env-Passw0rd!' 'deploy: password passed to the host deployment'
+    Assert-Equal "$($h7.Params.vmSize.value)" 'Standard_D4s_v5' 'deploy: shared host parameters passed'
+    Assert-Equal (@($h7.Params.customizationConfig.value.dataProtection.blockedUrls).Count) 1 'deploy: single-item arrays survive'
+    Assert-Equal (@($global:HostDeploys | Where-Object { Test-Path -LiteralPath $_.File }).Count) 0 'deploy: host parameter files (password) deleted'
+    Assert-Equal ($calls -match 'deployment group create --resource-group rg-hosts --name avd-host-avdsh-001-\d{12} --template-spec /subscriptions/\S+/templateSpecs/avd-sessionhost/versions/1\.0 --parameters @\S+ --no-wait') $true 'deploy: host deployment uses the template spec'
 }
 catch { $failures.Add("Deploy-Avd create threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 # -AddHosts: existing hosts 001, 002, 020 (plus an unrelated VM) -> new hosts start at 021
 $global:MockVmNames = '["avdsh-001","avdsh-002","avdsh-020","jumpbox-01"]'
-$global:AzCalls.Clear(); $global:DeployParamText = $null
+$global:AzCalls.Clear(); $global:DeployParamText = $null; $global:HostBuffer.Clear(); $global:HostDeploys.Clear()
 try {
-    & $deployScript -ParameterFile $exampleParams -AddHosts 5 -WhatIf
-    Assert-Equal ($global:DeployParamText -match '(?m)^param sessionHostStartIndex = 20\s*$') $true 'deploy -AddHosts: start index after highest existing host'
-    Assert-Equal ($global:DeployParamText -match '(?m)^param sessionHostCountOverride = 5\s*$') $true 'deploy -AddHosts: host count'
-    Assert-Equal (($global:AzCalls -join "`n") -match 'main\.deploy-tmp\.bicepparam') $true 'deploy -AddHosts: uses temporary param file'
+    & $deployScript -ParameterFile $exampleParams -AddHosts 5 -Force -DeploymentName 'avd-ci-add'
+    $names = @($global:HostDeploys | ForEach-Object { $_.Params.vmName.value })
+    Assert-Equal ($names -join ',') 'avdsh-021,avdsh-022,avdsh-023,avdsh-024,avdsh-025' 'deploy -AddHosts: next five numbers after the highest'
+    Assert-Equal ($global:DeployParamText -match '(?m)^param sessionHostCountOverride = 0\s*$') $true 'deploy -AddHosts: main deployment carries no hosts'
     Assert-Equal (Test-Path (Join-Path $repo 'infra/main.deploy-tmp.bicepparam')) $false 'deploy -AddHosts: temporary param file removed'
 }
 catch { $failures.Add("Deploy-Avd -AddHosts threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 
 # -InfraOnly -> zero hosts
-$global:AzCalls.Clear(); $global:DeployParamText = $null
+$global:AzCalls.Clear(); $global:DeployParamText = $null; $global:HostDeploys.Clear()
 try {
-    & $deployScript -ParameterFile $exampleParams -InfraOnly -WhatIf
+    & $deployScript -ParameterFile $exampleParams -InfraOnly -Force -DeploymentName 'avd-ci-infra'
     Assert-Equal ($global:DeployParamText -match '(?m)^param sessionHostCountOverride = 0\s*$') $true 'deploy -InfraOnly: no session hosts'
+    Assert-Equal $global:HostDeploys.Count 0 'deploy -InfraOnly: no host deployments'
+    Assert-Equal (($global:AzCalls -join "`n") -match 'ts create') $false 'deploy -InfraOnly: no template spec needed'
 }
 catch { $failures.Add("Deploy-Avd -InfraOnly threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 
-# Plain run over existing hosts -> overlap warning; with -Force it proceeds and saves outputs
-$global:HostBuffer.Clear()
+# Plain run over existing hosts -> existing ones skipped, the rest deployed, outputs saved
+$global:HostBuffer.Clear(); $global:HostDeploys.Clear()
 $outputsPath = Join-Path $repo 'infra/main.outputs.json'
 Remove-Item $outputsPath -ErrorAction SilentlyContinue
 try {
     & $deployScript -ParameterFile $exampleParams -Force -DeploymentName 'avd-ci2'
-    Assert-Equal ((($global:HostBuffer) -join "`n") -match 'would redeploy 3 host\(s\) that already exist') $true 'deploy: warns before redeploying existing hosts'
+    Assert-Equal ((($global:HostBuffer) -join "`n") -match 'Skipped\s+: 3 host\(s\) already exist') $true 'deploy: existing hosts reported as skipped'
+    $names = @($global:HostDeploys | ForEach-Object { $_.Params.vmName.value })
+    Assert-Equal $names.Count 97 'deploy: only missing hosts deployed'
+    Assert-Equal (($names -contains 'avdsh-020') -or ($names -contains 'avdsh-001')) $false 'deploy: existing hosts never redeployed'
     Assert-Equal (Test-Path $outputsPath) $true 'deploy: outputs saved next to param file'
 }
-catch { $failures.Add("Deploy-Avd overlap run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+catch { $failures.Add("Deploy-Avd skip-existing run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 Remove-Item $outputsPath -ErrorAction SilentlyContinue
+
+# A host that fails -> run reports it and prints a -HostNames retry; -HostNames redeploys just those
+$global:HostBuffer.Clear(); $global:HostDeploys.Clear(); $global:FailHosts = @('avdsh-023')
+$threw = $null
+try { & $deployScript -ParameterFile $exampleParams -AddHosts 5 -Force -DeploymentName 'avd-ci-fail' } catch { $threw = "$_" }
+Assert-Equal ($threw -match '1 session host\(s\) failed') $true 'deploy: failed host makes the run fail'
+Assert-Equal ((($global:HostBuffer) -join "`n") -match '-HostNames avdsh-023') $true 'deploy: retry command names the failed host'
+$global:FailHosts = @(); $global:HostDeploys.Clear()
+try {
+    & $deployScript -ParameterFile $exampleParams -HostNames 'avdsh-023', 'avdsh-002' -Force -DeploymentName 'avd-ci-retry'
+    Assert-Equal ((@($global:HostDeploys | ForEach-Object { $_.Params.vmName.value }) | Sort-Object) -join ',') 'avdsh-002,avdsh-023' 'deploy -HostNames: exactly the named hosts'
+}
+catch { $failures.Add("Deploy-Avd -HostNames threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+Remove-Item $outputsPath -ErrorAction SilentlyContinue
+$global:HostDeploys.Clear()
 
 # Private DNS pre-flight: privateDnsZoneMode = 'new' on a VNet already linked to another privatelink.file zone
 Write-Host "`n== Deploy-Avd.ps1 private DNS pre-flight (az mocked)" -ForegroundColor Cyan
@@ -430,19 +478,21 @@ Assert-Equal (($global:AzCalls -join "`n") -match 'graph query|private-dns') $fa
 Remove-Item $seParams -ErrorAction SilentlyContinue
 $global:AzResponses = $null
 
-# Deploy-Avd: personal pool of 1000 -> one host per user -> too many for one run
-Write-Host "`n== Deploy-Avd.ps1 batch guard (az mocked)" -ForegroundColor Cyan
+# Deploy-Avd: personal pool of 1000 -> one host per user. No batch limit any more: hosts are
+# separate deployments, so the main deployment stays small (no DeploymentSizeExceeded).
+Write-Host "`n== Deploy-Avd.ps1 large personal pool (az mocked)" -ForegroundColor Cyan
 $pdParams = Join-Path $repo 'infra/params/cipdbig.bicepparam'
 $pdText = ((Get-Content -Raw $exampleParams) -replace "using 'main.bicep'", "using '../main.bicep'").TrimEnd() + "`nparam hostPoolType = 'Personal'`n"
 [IO.File]::WriteAllText($pdParams, $pdText)
-$global:AzResponses = $null; $global:MockVmNames = '[]'; $global:AzCalls.Clear(); $global:HostBuffer.Clear()
+$global:AzResponses = $null; $global:MockVmNames = '[]'; $global:AzCalls.Clear(); $global:HostBuffer.Clear(); $global:HostDeploys.Clear()
 $threw = $null
-try { & $deployScript -ParameterFile $pdParams -WhatIf } catch { $threw = "$_" }
-Assert-Equal ($threw -match 'Too many hosts for one run \(1000\)') $true 'deploy: personal 1000 users = 1000 hosts, blocked as one run'
-$threw = $null
-try { & $deployScript -ParameterFile $pdParams -AddHosts 400 -WhatIf } catch { $threw = "$_" }
-Assert-Equal ([bool]$threw) $false 'deploy: -AddHosts 400 batch allowed'
+try { & $deployScript -ParameterFile $pdParams -Force -ThrottleLimit 50 -DeploymentName 'avd-ci-big' } catch { $threw = "$_" }
+Assert-Equal $threw $null 'deploy: personal 1000 users = 1000 hosts in one run'
+Assert-Equal $global:HostDeploys.Count 1000 'deploy: 1000 host deployments'
+Assert-Equal ((($global:HostBuffer) -join "`n") -match '1000 session hosts, avdsh-001 to avdsh-1000, 50 at a time') $true 'deploy: plan shows throttle'
 Remove-Item $pdParams -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $repo 'infra/params/cipdbig.outputs.json') -ErrorAction SilentlyContinue
+$global:HostDeploys.Clear()
 
 # Set-AvdPersonalAssignment: -FromGroup fills free desktops, skips users who already have one
 Write-Host "`n== Set-AvdPersonalAssignment.ps1 (az mocked)" -ForegroundColor Cyan
@@ -484,7 +534,7 @@ $global:AzResponses = [ordered]@{
 $global:MockVmNames = '[]'; $global:AzCalls.Clear(); $global:HostBuffer.Clear(); $global:PatchBody = $null
 $outputsPath = Join-Path $repo 'infra/main.outputs.json'
 try {
-    & $deployScript -ParameterFile $exampleParams -Force -DeploymentName 'avd-ci-name'
+    & $deployScript -ParameterFile $exampleParams -InfraOnly -Force -DeploymentName 'avd-ci-name'
     $patch = @($global:AzCalls | Where-Object { $_ -like 'rest --method patch*' })
     Assert-Equal ($patch.Count -eq 1 -and $patch[0] -match [regex]::Escape("$agIdT/desktops/SessionDesktop?api-version=")) $true 'desktop name: PATCH on the SessionDesktop resource'
     Assert-Equal ("$global:PatchBody" -match '"friendlyName":\s*"Contoso Desktop"') $true 'desktop name: friendly name sent'

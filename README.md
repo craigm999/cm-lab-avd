@@ -85,7 +85,7 @@ infra/
     Configure-SessionHost.ps1  # run command: FSLogix + Kerberos registry settings
 scripts/
   New-AvdParameterFile.ps1   # interactive questionnaire -> infra/params/<env>.bicepparam
-  Deploy-Avd.ps1             # deploy / -WhatIf / -AddHosts / -InfraOnly (Windows PowerShell)
+  Deploy-Avd.ps1             # deploy / -WhatIf / -AddHosts / -HostNames / -InfraOnly (Windows PowerShell)
   Update-SessionHostConfig.ps1  # re-apply FSLogix/Kerberos settings to existing hosts
   Test-AvdUserAccess.ps1     # read-only: why can't this user see / open the desktop?
   Set-FslogixStorageAuth.ps1 # one-off Entra app setup for FSLogix (privatelink, consent, CA check)
@@ -196,11 +196,27 @@ Session hosts deploy 20 at a time. A full 100-host deployment takes roughly 45�
    ```powershell
    .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -AddHosts 99
    ```
-   This creates `avdsh-002` to `avdsh-100` and leaves `avdsh-001` untouched. Zone placement continues round-robin, so the final spread is still 34/33/33. Raise the vCPU quota to 800 before this run. You can also add hosts in batches (`-AddHosts 20`, then `-AddHosts 20`, …).
+   This creates `avdsh-002` to `avdsh-100` and leaves `avdsh-001` untouched. Zone placement continues round-robin, so the final spread is still 34/33/33. Raise the vCPU quota to 800 before this run. There's no batch limit (see *How hosts are deployed* below). A plain run without `-AddHosts` also works: it creates every host the file describes that doesn't exist yet.
 
    On macOS/Linux with `deploy.sh`, set `sessionHostStartIndex = 1` and `sessionHostCountOverride = 99` in the file instead.
 
-Each run refreshes the host pool registration token (valid for 8 hours by default).
+Each run refreshes the host pool registration token, valid long enough for the hosts in that run (at least 8 hours).
+
+### How hosts are deployed
+
+`Deploy-Avd.ps1` deploys in two stages:
+
+1. **Shared resources** (host pool, workspace, storage, network, RBAC) in one subscription deployment, with no hosts in it.
+2. **Session hosts.** `infra/modules/sessionhost.bicep` is published as the template spec `avd-sessionhost` (version 1.0) in the service resource group. Each host then gets **its own small deployment** (`avd-host-<vm>-<time>` in the hosts resource group). By default 20 run at a time; change that with `-ThrottleLimit`. The script shows progress and lists any failures at the end.
+
+Hosts used to be a copy loop inside the main deployment. ARM repeats the whole host template, including the setup scripts and `customizations.json`, once per host. At around 50 to 100 hosts that passes ARM's 4 MB limit and fails with `DeploymentSizeExceeded`. With one deployment per host, there's no limit on how many hosts a run can create.
+
+- **A host failed?** Fix the cause (quota, free subnet IPs, image), then retry only those hosts. The script prints the exact command:
+  ```powershell
+  .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -HostNames avdsh-021,avdsh-030
+  ```
+- **Closed the window mid-run?** Deployments already started keep going in Azure. Run the script again: it skips hosts that exist and creates the rest.
+- **deploy.sh / plain `az deployment sub create`** still use the copy loop, so keep those runs to about 50 hosts (`sessionHostCountOverride`).
 
 ## Personal (1:1) desktops
 
@@ -237,11 +253,11 @@ The type of an existing host pool can't be changed, so a personal deployment cre
    .\scripts\Set-AvdPersonalAssignment.ps1 -ParameterFile .\infra\params\prod.bicepparam -FromGroup 'AVD Users' -WhatIf
    ```
    It gives every group member who has no desktop yet the next free one. You can also use `-User` with `-SessionHost`, or `-CsvPath` with columns `User,SessionHost`. `Test-AvdUserAccess.ps1` shows whether a user has a desktop assigned.
-4. **Scale out in batches of up to 400.** ARM allows 800 resources per deployment, and `Deploy-Avd.ps1` refuses larger single runs:
+4. **Scale out.** Remove the pilot `sessionHostCountOverride` and run again. Every missing desktop is created, each in its own deployment, so a run can create all 1,000 (see *How hosts are deployed*):
    ```powershell
-   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -AddHosts 400
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -ThrottleLimit 40
    ```
-   Repeat until you have one VM per user. Request the vCPU quota first.
+   `-AddHosts N` adds a set number instead. Request the vCPU quota first. Compute throttling, not ARM, is the practical limit on `-ThrottleLimit`; 20 to 50 works well.
 5. **Remove the pooled deployment** once nobody uses it. The template doesn't delete anything:
    - **Session hosts:** delete the `avdsh-*` VMs. Deleting a VM removes its NIC and disk. Then remove them from the pooled host pool (*Host pool → Session hosts*).
    - **Pooled AVD objects:** delete the pooled scaling plan, then the app group `vdag-…-desktop`, then the host pool `vdpool-…` (without `-personal`).
@@ -483,7 +499,7 @@ Keep **one parameter file per environment** (for example `infra/params/prod.bice
 
 Two rules keep updates safe:
 
-- **Don't touch existing hosts by accident.** Use `-AddHosts` or `-InfraOnly`. Without them, a run that includes host numbers that already exist re-runs those hosts' setup steps. Azure refuses that on hosts autoscale has stopped, so the run fails. `Deploy-Avd.ps1` warns and asks before doing it.
+- **Existing hosts are left alone.** `Deploy-Avd.ps1` never redeploys a host that exists unless you name it with `-HostNames`. Re-running setup on a host that autoscale has stopped fails, so start it first if you do. To change settings on existing hosts, use `Update-SessionHostConfig.ps1`.
 - **Make changes in the parameter file, not the portal.** The deployment re-applies host pool, app group and scaling plan settings, so a portal change is reverted on the next run.
 
 Deployments are incremental. Resources you remove from the template, or switch off (for example `deployFslogixStorage = false`), are **not** deleted. Delete them yourself if you really mean to.
@@ -543,9 +559,10 @@ Common causes:
 | Error | Cause | Fix |
 |---|---|---|
 | *"A virtual network cannot be linked to multiple zones with overlapping namespaces… privatelink.file.core.windows.net"* | The VNet is already linked to a `privatelink.file` zone: a central or hub zone, or a leftover from an earlier attempt that used a different storage resource group. `privateDnsZoneMode = 'new'` tries to link a second one. | Use the zone that's already linked: `privateDnsZoneMode = 'existing'` and `existingFilePrivateDnsZoneId = '<that zone's ID>'`. `Deploy-Avd.ps1` now checks for this before deploying and prints the ID. If the zone is a leftover from your own earlier attempt, you can delete its VNet link instead. |
-| Quota / `OperationNotAllowed` on VMs | vCPU quota | Request more quota for the VM family and region, then re-run with `-AddHosts` for the missing hosts. |
+| Quota / `OperationNotAllowed` on VMs | vCPU quota | Request more quota for the VM family and region, then re-run `Deploy-Avd.ps1`. It creates only the missing hosts, or use `-HostNames` with the failed ones. |
 | `AADLoginForWindows` exit code `-2145648607` | The host can't reach `enterpriseregistration.windows.net` | Firewall: see [`docs/firewall-rules.md`](docs/firewall-rules.md) |
-| Extension error on a host that autoscale stopped | A re-run touched an existing, deallocated host | Use `-AddHosts` or `-InfraOnly` |
+| Extension error on a host that autoscale stopped | A re-run touched an existing, deallocated host | Start the VM, then `-HostNames <vm>` |
+| `DeploymentSizeExceeded` (*template size exceeds 4 MB*) | Too many hosts in one copy-loop deployment (`deploy.sh` or an older `Deploy-Avd.ps1`) | Use the current `Deploy-Avd.ps1`, which deploys each host separately. With `deploy.sh`, keep to about 50 hosts per run. |
 
 **Start over only if you want to change names** (prefix, environment, resource group names), because names can't be changed in place. In that case:
 - Delete only the resource groups the deployment **created** (`create: true`), never your existing network or DNS groups.
