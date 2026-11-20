@@ -603,6 +603,61 @@ try {
 }
 catch { $failures.Add("Update-SessionHostConfig -IncludeStopped threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 
+# Update-SessionHostDisk: type + size change, a busy host, a host that already matches
+Write-Host "`n== Update-SessionHostDisk.ps1 (az mocked)" -ForegroundColor Cyan
+$diskScript = Join-Path $repo 'scripts/Update-SessionHostDisk.ps1'
+$poolT = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-svc/providers/Microsoft.DesktopVirtualization/hostPools/vdpool-x-personal'
+$dPre = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-hosts/providers/Microsoft.Compute/disks/'
+function Reset-DiskMock([string] $ExtendOutput) {
+    $global:AzResponses = [ordered]@{
+        'vm list --resource-group rg-hosts --show-details*' = '[{"name":"avdpd-001","power":"VM running","diskId":"' + $dPre.ToUpper() + 'AVDPD-001-OSDISK"},{"name":"avdpd-002","power":"VM deallocated","diskId":"' + $dPre + 'avdpd-002-osdisk"},{"name":"avdpd-003","power":"VM running","diskId":"' + $dPre + 'avdpd-003-osdisk"},{"name":"avdpd-004","power":"VM running","diskId":"' + $dPre + 'avdpd-004-osdisk"},{"name":"jumpbox","power":"VM running","diskId":"' + $dPre + 'jumpbox-osdisk"}]'
+        'disk list*' = '[{"id":"' + $dPre + 'avdpd-001-osdisk","sku":"Premium_LRS","size":128},{"id":"' + $dPre + 'avdpd-002-osdisk","sku":"Premium_LRS","size":128},{"id":"' + $dPre + 'avdpd-003-osdisk","sku":"Premium_LRS","size":128},{"id":"' + $dPre + 'avdpd-004-osdisk","sku":"StandardSSD_LRS","size":512},{"id":"' + $dPre + 'jumpbox-osdisk","sku":"Premium_LRS","size":128}]'
+        'rest --method get --url *sessionHosts*' = '{"value":[{"name":"vdpool-x-personal/avdpd-001","properties":{"sessions":0,"allowNewSession":true}},{"name":"vdpool-x-personal/avdpd-002","properties":{"sessions":0,"allowNewSession":true}},{"name":"vdpool-x-personal/avdpd-003","properties":{"sessions":1,"allowNewSession":true}},{"name":"vdpool-x-personal/avdpd-004","properties":{"sessions":0,"allowNewSession":true}}]}'
+        'rest --method patch*' = ''
+        'vm run-command invoke*' = $ExtendOutput
+    }
+    $global:AzCalls.Clear(); $global:HostBuffer.Clear(); $global:BodyLog = [System.Collections.Generic.List[object]]::new()
+}
+$diskArgs = @{ ResourceGroup = 'rg-hosts'; HostPoolId = $poolT; DiskType = 'StandardSSD_LRS'; SizeGB = 256 }
+Reset-DiskMock 'C: extended to 256 GB'
+try {
+    & $diskScript @diskArgs -WhatIf
+    $out = ($global:HostBuffer) -join "`n"
+    Assert-Equal ($out -match '2 to change, 1 skipped \(signed in\), 1 already match') $true 'disk -WhatIf: plan (busy host skipped, bigger disk kept, jump box ignored)'
+    Assert-Equal ($out -match 'avdpd-001\s+VM running\s+Premium_LRS -> StandardSSD_LRS, 128 -> 256 GiB') $true 'disk -WhatIf: shows the change per host'
+    Assert-Equal (@($global:AzCalls | Where-Object { $_ -match '^disk update|^vm deallocate|^rest --method patch' }).Count) 0 'disk -WhatIf: changes nothing'
+}
+catch { $failures.Add("Update-SessionHostDisk -WhatIf threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
+Reset-DiskMock 'C: extended to 256 GB'
+try {
+    & $diskScript @diskArgs -Force
+    $c = @($global:AzCalls)
+    $upd = @($c | Where-Object { $_ -like 'disk update*' })
+    Assert-Equal $upd.Count 2 'disk: two disks updated'
+    Assert-Equal ($upd[0] -match 'AVDPD-001-OSDISK.*--sku StandardSSD_LRS --size-gb 256') $true 'disk: sku and size passed'
+    Assert-Equal (@($c | Where-Object { $_ -match 'avdpd-00[34]' -and $_ -notlike 'vm list*' -and $_ -notlike 'disk list*' }).Count) 0 'disk: busy and matching hosts untouched'
+    $iDrain = [array]::IndexOf([string[]]$c, @($c | Where-Object { $_ -like 'rest --method patch*avdpd-001*' })[0])
+    $iDealloc = [array]::IndexOf([string[]]$c, @($c | Where-Object { $_ -like 'vm deallocate --resource-group rg-hosts --name avdpd-001*' })[0])
+    $iUpd = [array]::IndexOf([string[]]$c, $upd[0])
+    Assert-Equal ($iDrain -ge 0 -and $iDrain -lt $iDealloc -and $iDealloc -lt $iUpd) $true 'disk: drain, then deallocate, then update'
+    $drainBodies = @($global:BodyLog | Where-Object { $_.Url -match 'avdpd-001' } | ForEach-Object { "$($_.Body)" -replace '\s', '' })
+    Assert-Equal (($drainBodies -join '|') -match '"allowNewSession":false.*\|.*"allowNewSession":true') $true 'disk: drain mode on, then restored'
+    Assert-Equal (@($c | Where-Object { $_ -like 'vm start --resource-group rg-hosts --name avdpd-00[12]*' }).Count) 2 'disk: both started (running host; stopped host to extend C:)'
+    Assert-Equal (@($c | Where-Object { $_ -match '^vm run-command invoke .*--scripts @\S+avd-extend-c-\w+\.ps1' }).Count) 2 'disk: C: extended on both'
+    Assert-Equal (@($c | Where-Object { $_ -like 'vm deallocate --resource-group rg-hosts --name avdpd-002*' }).Count) 1 'disk: stopped host deallocated again afterwards (only once)'
+    Assert-Equal (@($c | Where-Object { $_ -like 'vm deallocate --resource-group rg-hosts --name avdpd-001*' }).Count) 1 'disk: running host left running'
+    Assert-Equal ((($global:HostBuffer) -join "`n") -match 'Done: 2 changed, 0 failed') $true 'disk: summary'
+}
+catch { $failures.Add("Update-SessionHostDisk threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
+Reset-DiskMock 'Resize-Partition : Size Not Supported'
+$threw = $null
+try { & $diskScript @diskArgs -Force -VmName avdpd-001 } catch { $threw = "$_" }
+Assert-Equal ($threw -match '1 host\(s\) need attention') $true 'disk: failed C: extension reported'
+Assert-Equal ((($global:HostBuffer) -join "`n") -match 'C: NOT extended - a recovery partition') $true 'disk: recovery partition hint'
+$global:AzResponses = $null; $global:BodyLog = $null
+
 # Test-AvdUserAccess: healthy member, then an unassigned guest
 Write-Host "`n== Test-AvdUserAccess.ps1 (az mocked)" -ForegroundColor Cyan
 $accessScript = Join-Path $repo 'scripts/Test-AvdUserAccess.ps1'

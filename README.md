@@ -87,6 +87,7 @@ scripts/
   New-AvdParameterFile.ps1   # interactive questionnaire -> infra/params/<env>.bicepparam
   Deploy-Avd.ps1             # deploy / -WhatIf / -AddHosts / -HostNames / -InfraOnly (Windows PowerShell)
   Update-SessionHostConfig.ps1  # re-apply FSLogix/Kerberos settings to existing hosts
+  Update-SessionHostDisk.ps1 # change OS disk type/size on existing hosts (drain, deallocate, resize, extend C:)
   Test-AvdUserAccess.ps1     # read-only: why can't this user see / open the desktop?
   Set-FslogixStorageAuth.ps1 # one-off Entra app setup for FSLogix (privatelink, consent, CA check)
   Get-FslogixHostDiagnostics.ps1 # read-only: why won't profiles load on this host?
@@ -510,8 +511,35 @@ Deployments are incremental. Resources you remove from the template, or switch o
 | **Add FSLogix profiles** to a deployment that didn't have them | See the steps below. |
 | **Change host pool settings** (max sessions, load balancing, RDP properties, SSO, scaling schedule) | Edit the parameter file (schedules are in `infra/modules/hostpool.bicep`), then run `Deploy-Avd.ps1 -InfraOnly`. Takes effect immediately. A lower max sessions limit applies to new connections. |
 | **Change profile size or share path** on existing hosts | Edit the file, then run `Deploy-Avd.ps1 -InfraOnly` (if storage changed) and `Update-SessionHostConfig.ps1 -IncludeStopped`. |
+| **Change the OS disk type or size** | See *Changing the OS disk* below. |
 | **New image, VM size or Windows build** | Replace hosts rather than changing them in place. Run `-AddHosts N` with the new `imageReference` / `vmSize` in the file. In the portal, set the old hosts to drain mode (*Host pool → Session hosts → Turn off new sessions*). Once they're empty, delete them (VM, NIC and disk are removed together). Users never sit on a host that's mid-change. |
 | **Remove hosts** | Drain mode first. When the host has no sessions, delete the VM in the portal and remove the session host from the host pool. Numbers aren't reused unless you set `sessionHostStartIndex` yourself. |
+
+### Changing the OS disk (type or size)
+
+1. Set the new values in the parameter file, then run `Deploy-Avd.ps1 -InfraOnly`. This makes new hosts, including spares from the pool automation, use the new disk.
+   ```bicep
+   param osDiskType = 'StandardSSD_LRS'   // Premium_LRS | StandardSSD_LRS | Premium_ZRS | StandardSSD_ZRS
+   param osDiskSizeGB = 256
+   ```
+2. Change the existing hosts. Preview first:
+   ```powershell
+   .\scripts\Update-SessionHostDisk.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
+   ```
+   ```powershell
+   .\scripts\Update-SessionHostDisk.ps1 -ParameterFile .\infra\params\prod.bicepparam
+   ```
+   Azure only changes an OS disk while the VM is deallocated, so each host is offline for about 5 to 10 minutes. The script works through the hosts 5 at a time (`-ThrottleLimit`). For each host it:
+   - turns on drain mode, which also stops Start VM on Connect from starting it mid-change;
+   - skips the host if anyone is signed in;
+   - deallocates the host and changes the disk;
+   - if the disk grew, starts the host and extends C: into the new space;
+   - returns the host to how it was: running hosts stay running, stopped hosts are deallocated again, and drain mode is restored.
+
+   Hosts that already match are left alone. Re-run the same command later to pick up hosts that were in use. Use `-VmName` to target specific hosts.
+
+- **Disks can't shrink.** A host whose disk is already bigger keeps its size, though its type still changes. To go smaller, replace the host.
+- **"C: NOT extended"** means the disk grew but Windows couldn't extend C:, usually because a recovery partition sits right after it. Fix it on that host with Disk Management, or delete the recovery partition with diskpart.
 
 ### Adding FSLogix profiles after the first deployment
 
