@@ -65,6 +65,11 @@ check "Host pool supports Personal (assignment type + Persistent load balancing)
   'any(.[]; .type=="Microsoft.DesktopVirtualization/hostPools" and (.properties|tostring|test("personalDesktopAssignmentType")) and (.properties|tostring|test("Persistent")))'
 check "Personal autoscale schedules (start on connect, deallocate on disconnect/logoff)" \
   'any(.[]; .type=="Microsoft.DesktopVirtualization/scalingPlans/personalSchedules" and (.properties.peakActionOnDisconnect=="Deallocate") and (.properties.rampUpStartVMOnConnect=="Enable"))'
+check "VM security type is parameterised (Trusted Launch or Standard for custom images)" \
+  'any(.[]; .type=="Microsoft.Compute/virtualMachines" and (.properties.securityProfile|tostring|test("securityType")))'
+check "Guest attestation only deployed with Trusted Launch" \
+  'any(.[]; .type=="Microsoft.Compute/virtualMachines/extensions" and .properties.type?=="GuestAttestation" and (.condition|tostring|test("TrustedLaunch")))'
+if jq -e '.outputs.desktopAppGroupId and .outputs.desktopFriendlyName' "$T" >/dev/null; then pass "outputs for setting the desktop display name"; else fail "outputs for setting the desktop display name"; fi
 check "AVD agent runs after Entra join (dependsOn chain)" \
   'any(.[]; .properties.type?=="DSC" and ((.dependsOn // []) | length) > 0)'
 check "Session host VM has SystemAssigned identity" \

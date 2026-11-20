@@ -142,6 +142,13 @@ param availabilityZones array = [
 @description('Enable encryption at host (requires the EncryptionAtHost feature registered on the subscription).')
 param encryptionAtHost bool = false
 
+@description('TrustedLaunch (default; Gen2 marketplace images or Compute Gallery definitions with security type TrustedLaunchSupported/TrustedLaunch) or Standard (Gen1 images, managed images, or gallery definitions without Trusted Launch support).')
+@allowed([
+  'TrustedLaunch'
+  'Standard'
+])
+param vmSecurityType string = 'TrustedLaunch'
+
 @description('Local administrator user name for the session hosts (break-glass only; users sign in with Entra ID).')
 param localAdminUsername string = 'avdadmin'
 
@@ -521,6 +528,7 @@ module sessionHosts 'modules/sessionhost.bicep' = [
       osDiskType: osDiskType
       osDiskSizeGB: osDiskSizeGB
       encryptionAtHost: encryptionAtHost
+      securityType: vmSecurityType
       adminUsername: localAdminUsername
       adminPassword: localAdminPassword
       hostPoolResourceGroupName: rgServiceName
@@ -544,6 +552,10 @@ module sessionHosts 'modules/sessionhost.bicep' = [
 // =====================================================================================
 output hostPoolName string = hostPool.outputs.hostPoolName
 output workspaceName string = hostPool.outputs.workspaceName
+// Used by Deploy-Avd.ps1: the desktop's display name in Windows App lives on the
+// read-only applicationGroups/desktops resource, so it is set after deployment.
+output desktopAppGroupId string = hostPool.outputs.appGroupId
+output desktopFriendlyName string = desktopFriendlyName
 output sessionHostsRequired int = requiredSessionHosts
 output sessionHostsDeployedThisRun int = sessionHostCount
 output totalSessionCapacity int = isPersonal ? requiredSessionHosts : requiredSessionHosts * maxSessionsPerHost

@@ -251,6 +251,37 @@ The type of an existing host pool can't be changed, so a personal deployment cre
 - **Image:** the default Windows 11 *multi-session* + Microsoft 365 image works for personal pools. For single-session, set `imageReference` to e.g. `MicrosoftWindowsDesktop` / `windows-11` / `win11-24h2-ent` (no Microsoft 365 Apps preinstalled).
 - **Start VM on Connect** is enabled. It needs the AVD service principal's *Power On Off Contributor* role, which the deployment assigns when `avdServicePrincipalObjectId` is set.
 
+## Custom images
+
+`imageReference` takes either a marketplace image or an **Azure Compute Gallery** image. Microsoft recommends the gallery for production, for replication and versioning.
+
+```bicep
+// Latest version of a gallery image definition (new hosts pick up new versions automatically)
+param imageReference = {
+  id: '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Compute/galleries/<gallery>/images/<definition>'
+}
+// ...or pin one version: .../images/<definition>/versions/1.2.0
+param vmSecurityType = 'TrustedLaunch'   // 'Standard' if the image can't use Trusted Launch
+```
+
+You can also re-run the questionnaire and choose *gallery*.
+
+**Building the image** (per Microsoft's golden image and Trusted Launch guidance):
+- Start from the same Windows 11 Enterprise image (multi-session for pooled). Customise it, then **sysprep (generalize)** it.
+- **Don't install the AVD agent** or join the build VM to a host pool. Don't create it with *Login with Microsoft Entra ID*. The deployment does both on each host.
+- **Trusted Launch** (the default `vmSecurityType`) needs a **Gen2** image whose definition has security type **`TrustedLaunchSupported`** (recommended) or `TrustedLaunch`. Plain managed images and Gen1 images can't use it; set `vmSecurityType = 'Standard'` for those.
+- **Replicate** the image version to the deployment region. The deploying identity needs *Reader* on the gallery, which can be in another subscription.
+
+`Deploy-Avd.ps1` checks all of this before deploying: definition found, generalized, Gen2 and security type compatible with `vmSecurityType`, and the version replicated to the region. It stops with the reason if not.
+
+**Rolling out a new image.** Changing `imageReference` only affects hosts created afterwards. Azure can't change the image of an existing VM, and `Deploy-Avd.ps1` warns before a run would touch existing hosts.
+- **Pooled:** run `-AddHosts N` with the new image, set the old hosts to drain mode, and delete them once they're empty. See *Updating an existing deployment*.
+- **Personal:** each user's VM keeps its own image, profile and data. Patch personal VMs in place (Windows Update / your update tooling). A new image is for new desktops. Moving an existing user to a new VM means moving their data, unless OneDrive Known Folder Move or FSLogix holds it.
+
+## Desktop name in Windows App
+
+Users see the friendlyName of the desktop resource inside the app group, not the app group's name. That resource (`SessionDesktop`) is read-only in ARM templates, so `Deploy-Avd.ps1` sets it to `desktopFriendlyName` after each deployment. To change the name, edit `desktopFriendlyName` and run `Deploy-Avd.ps1 -InfraOnly`. Users see it after their feed refreshes; sign out of Windows App and back in to force it.
+
 ## Updating an existing deployment
 
 Keep **one parameter file per environment** (for example `infra/params/prod.bicepparam`) as the source of truth. Change it, preview with `-WhatIf`, then deploy. Re-run the questionnaire with `-AnswersFile infra/params/prod.answers.json` if you'd rather answer prompts than edit the file.

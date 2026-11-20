@@ -18,6 +18,13 @@ param imageReference object
 param osDiskType string
 param osDiskSizeGB int
 param encryptionAtHost bool = false
+
+@description('TrustedLaunch (Secure Boot + vTPM; needs a Gen2 image - marketplace or a Compute Gallery definition with security type TrustedLaunchSupported/TrustedLaunch) or Standard (for Gen1 images, managed images or gallery definitions without Trusted Launch support).')
+@allowed([
+  'TrustedLaunch'
+  'Standard'
+])
+param securityType string = 'TrustedLaunch'
 param adminUsername string
 @secure()
 param adminPassword string
@@ -105,14 +112,18 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
         }
       ]
     }
-    securityProfile: {
-      securityType: 'TrustedLaunch'
-      encryptionAtHost: encryptionAtHost
-      uefiSettings: {
-        secureBootEnabled: true
-        vTpmEnabled: true
-      }
-    }
+    securityProfile: securityType == 'TrustedLaunch'
+      ? {
+          securityType: 'TrustedLaunch'
+          encryptionAtHost: encryptionAtHost
+          uefiSettings: {
+            secureBootEnabled: true
+            vTpmEnabled: true
+          }
+        }
+      : {
+          encryptionAtHost: encryptionAtHost
+        }
     diagnosticsProfile: {
       bootDiagnostics: {
         enabled: true
@@ -135,7 +146,7 @@ resource entraJoin 'Microsoft.Compute/virtualMachines/extensions@2024-07-01' = {
 }
 
 // Trusted Launch boot integrity monitoring.
-resource guestAttestation 'Microsoft.Compute/virtualMachines/extensions@2024-07-01' = {
+resource guestAttestation 'Microsoft.Compute/virtualMachines/extensions@2024-07-01' = if (securityType == 'TrustedLaunch') {
   parent: vm
   name: 'GuestAttestation'
   location: location

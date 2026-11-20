@@ -357,3 +357,4 @@ output hostPoolName string = hostPool.name
 output hostPoolId string = hostPool.id
 output workspaceName string = workspace.name
 output appGroupName string = desktopAppGroup.name
+output appGroupId string = desktopAppGroup.id

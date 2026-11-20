@@ -308,6 +308,58 @@ if ($fslogixOn -and $fslogixAccess -eq 'privateEndpoint' -and $dnsMode -eq 'new'
     }
 }
 
+# ------------------------------------------------------------------ Custom image pre-flight
+# imageReference = { id: '<Compute Gallery image definition or version ID>' }
+if ($paramText -match "(?s)imageReference\s*=\s*\{\s*id:\s*'([^']+)'") {
+    $imageId = $Matches[1]
+    $secType = Get-ParamValue $paramText 'vmSecurityType' 'TrustedLaunch'
+    Write-Step 'Checking the custom image'
+    $imgProblems = @()
+    if ($imageId -notmatch '/providers/Microsoft\.Compute/galleries/([^/]+)/images/([^/]+)(/versions/([^/]+))?$') {
+        $imgProblems += 'imageReference.id is not a Compute Gallery image definition or version. Managed images do not support Trusted Launch - use a gallery, or set vmSecurityType = ''Standard''.'
+    }
+    else {
+        $gallery = $Matches[1]; $definition = $Matches[2]; $version = $Matches[4]
+        $imgRg = ($imageId -split '/')[4]; $imgSub = ($imageId -split '/')[2]
+        $defId = ($imageId -split '/versions/')[0]
+        $def = $null
+        $d = Test-Az sig image-definition show --ids $defId --query '{gen:hyperVGeneration, state:osState, features:features}' -o json --only-show-errors
+        if ($d.Ok -and $d.Output) { $def = $d.Output | ConvertFrom-Json }
+        if (-not $def) { $imgProblems += "Image definition not found or not readable: $defId (the deploying identity needs Reader on the gallery)." }
+        else {
+            $feat = @(foreach ($f in $def.features) { $f })
+            $st = "$((@($feat | Where-Object { $_.name -eq 'SecurityType' }) | Select-Object -First 1).value)"
+            Write-Host ("  definition: {0}, {1}, security type {2}" -f $def.gen, $def.state, $(if ($st) { $st } else { 'Standard' }))
+            if ("$($def.state)" -ne 'Generalized') { $imgProblems += 'The image definition is Specialized - session hosts need a Generalized (sysprepped) image.' }
+            if ($secType -eq 'TrustedLaunch') {
+                if ("$($def.gen)" -ne 'V2') { $imgProblems += 'Trusted Launch needs a Gen2 image - set vmSecurityType = ''Standard'' for this Gen1 image.' }
+                elseif ($st -notmatch '^TrustedLaunch') { $imgProblems += "The definition's security type is '$(if ($st) { $st } else { 'Standard' })' - Trusted Launch needs TrustedLaunchSupported or TrustedLaunch. Recreate the definition, or set vmSecurityType = 'Standard'." }
+            }
+            elseif ($st -eq 'TrustedLaunch') { $imgProblems += 'The definition is TrustedLaunch-only - set vmSecurityType = ''TrustedLaunch''.' }
+        }
+        $vq = '[].{name:name, regions:publishingProfile.targetRegions[].name, exclude:publishingProfile.excludeFromLatest, state:provisioningState}'
+        $vl = Test-Az sig image-version list --subscription $imgSub --resource-group $imgRg --gallery-name $gallery --gallery-image-definition $definition --query $vq -o json --only-show-errors
+        if ($vl.Ok -and $vl.Output) {
+            $parsedVersions = $vl.Output | ConvertFrom-Json
+            $versions = @(foreach ($v in $parsedVersions) { $v })
+            $pick = if ($version) { @($versions | Where-Object { $_.name -eq $version }) } else { @($versions | Where-Object { -not $_.exclude -and $_.state -eq 'Succeeded' } | Sort-Object { [version]("$($_.name)") } | Select-Object -Last 1) }
+            if (-not $pick.Count) { $imgProblems += $(if ($version) { "Image version $version not found." } else { 'No usable image version (all excluded from latest or not Succeeded).' }) }
+            else {
+                $regions = @(foreach ($r in $pick[0].regions) { ("$r" -replace '\s', '').ToLowerInvariant() })
+                Write-Host ("  version: {0} (replicated to {1})" -f $pick[0].name, ($regions -join ', '))
+                if ($regions -notcontains $Location.ToLowerInvariant()) { $imgProblems += "Image version $($pick[0].name) is not replicated to $Location - add it as a target region in the gallery." }
+            }
+        }
+        else { $imgProblems += 'Could not list image versions (permissions?).' }
+    }
+    if ($imgProblems.Count) {
+        foreach ($pmsg in $imgProblems) { Write-Host "  ! $pmsg" -ForegroundColor Red }
+        if ($tempParamFile) { Remove-Item -LiteralPath $tempParamFile -ErrorAction SilentlyContinue }
+        throw 'Custom image problem - see above. Nothing was deployed.'
+    }
+    Write-Host '  ok - image is usable'
+}
+
 # ------------------------------------------------------------------ Password
 $setPassword = $false
 if (-not $env:AVD_LOCAL_ADMIN_PASSWORD) {
@@ -370,6 +422,24 @@ try {
     }
     Write-Host ''
     Write-Host "Outputs saved to $outputsFile"
+
+    # The name users see in Windows App is the friendlyName of the desktop resource inside
+    # the app group ("SessionDesktop"). That resource is read-only in ARM templates, so set
+    # it here - the documented route is an update (PATCH), e.g. Update-AzWvdDesktop.
+    $agId = if ($outputs.PSObject.Properties['desktopAppGroupId']) { "$($outputs.desktopAppGroupId.value)" } else { '' }
+    $friendly = if ($outputs.PSObject.Properties['desktopFriendlyName']) { "$($outputs.desktopFriendlyName.value)" } else { '' }
+    if ($agId -and $friendly) {
+        $desk = Test-Az rest --method get --url "https://management.azure.com$agId/desktops?api-version=2024-04-03" --query 'value[0].name' -o tsv --only-show-errors
+        $deskName = if ($desk.Ok -and $desk.Output) { ($desk.Output -split '/')[-1] } else { 'SessionDesktop' }
+        $tmpBody = [IO.Path]::GetTempFileName()
+        try {
+            [IO.File]::WriteAllText($tmpBody, (@{ properties = @{ friendlyName = $friendly } } | ConvertTo-Json -Depth 3), (New-Object System.Text.UTF8Encoding($false)))
+            $pr = Test-Az rest --method patch --url "https://management.azure.com$agId/desktops/$($deskName)?api-version=2024-04-03" --headers 'Content-Type=application/json' --body "@$tmpBody" --only-show-errors
+            if ($pr.Ok) { Write-Host "Desktop name in Windows App set to '$friendly' (users see it after their feed refreshes)." -ForegroundColor Green }
+            else { Write-Host "Could not set the desktop name - set it with: Update-AzWvdDesktop -ResourceGroupName <rg> -ApplicationGroupName <app group> -Name $deskName -FriendlyName '$friendly'" -ForegroundColor Yellow }
+        }
+        finally { Remove-Item -LiteralPath $tmpBody -ErrorAction SilentlyContinue }
+    }
     Write-Host 'Next: the post-deployment steps in README.md (storage admin consent, CA exclusion, NTFS permissions).'
 }
 finally {

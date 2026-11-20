@@ -468,6 +468,47 @@ try { & $assignScript -HostPoolName 'vdpool-x-personal' -User 'x@contoso.com' -S
 Assert-Equal ($threw -match 'only apply to Personal host pools') $true 'assign: refuses a pooled host pool'
 $global:AzResponses = $null
 
+# Deploy-Avd: after a create, the desktop display name is set on the SessionDesktop resource
+Write-Host "`n== Deploy-Avd.ps1 desktop display name (az mocked)" -ForegroundColor Cyan
+$agIdT = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-svc/providers/Microsoft.DesktopVirtualization/applicationGroups/vdag-x-desktop'
+$global:AzResponses = [ordered]@{
+    'deployment sub create*' = '{"desktopAppGroupId":{"type":"String","value":"' + $agIdT + '"},"desktopFriendlyName":{"type":"String","value":"Contoso Desktop"},"sessionHostResourceGroup":{"type":"String","value":"rg-hosts"}}'
+    'rest --method get --url https://management.azure.com*/desktops*' = 'vdag-x-desktop/SessionDesktop'
+    'rest --method patch*' = ''
+}
+$global:MockVmNames = '[]'; $global:AzCalls.Clear(); $global:HostBuffer.Clear(); $global:PatchBody = $null
+$outputsPath = Join-Path $repo 'infra/main.outputs.json'
+try {
+    & $deployScript -ParameterFile $exampleParams -Force -DeploymentName 'avd-ci-name'
+    $patch = @($global:AzCalls | Where-Object { $_ -like 'rest --method patch*' })
+    Assert-Equal ($patch.Count -eq 1 -and $patch[0] -match [regex]::Escape("$agIdT/desktops/SessionDesktop?api-version=")) $true 'desktop name: PATCH on the SessionDesktop resource'
+    Assert-Equal ("$global:PatchBody" -match '"friendlyName":\s*"Contoso Desktop"') $true 'desktop name: friendly name sent'
+}
+catch { $failures.Add("Deploy-Avd desktop name threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+Remove-Item $outputsPath -ErrorAction SilentlyContinue
+
+# Deploy-Avd: custom (Compute Gallery) image pre-flight
+Write-Host "`n== Deploy-Avd.ps1 custom image pre-flight (az mocked)" -ForegroundColor Cyan
+$imgDef = '/subscriptions/55555555-5555-5555-5555-555555555555/resourceGroups/rg-images/providers/Microsoft.Compute/galleries/gal_avd/images/win11-avd'
+$imgParams = Join-Path $repo 'infra/params/ciimg.bicepparam'
+$imgText = ((Get-Content -Raw $exampleParams) -replace "using 'main.bicep'", "using '../main.bicep'") -replace "(?s)param imageReference = \{.*?\n\}", "param imageReference = {`n  id: '$imgDef'`n}"
+[IO.File]::WriteAllText($imgParams, $imgText)
+$tlDef = '{"gen":"V2","state":"Generalized","features":[{"name":"SecurityType","value":"TrustedLaunchSupported"}]}'
+function Invoke-ImageCheck([string] $Def, [string] $Versions) {
+    $global:AzResponses = [ordered]@{ 'sig image-definition show*' = $Def; 'sig image-version list*' = $Versions }
+    $global:HostBuffer.Clear()
+    try { & $deployScript -ParameterFile $imgParams -WhatIf; return '' } catch { return "$_" }
+}
+$r1 = Invoke-ImageCheck $tlDef '[{"name":"1.0.0","regions":["UK South"],"exclude":false,"state":"Succeeded"},{"name":"1.1.0","regions":["West Europe"],"exclude":false,"state":"Succeeded"}]'
+Assert-Equal ($r1 -match 'Custom image problem') $true 'image: latest version not replicated to the region is caught'
+Assert-Equal ((($global:HostBuffer) -join "`n") -match 'Image version 1\.1\.0 is not replicated to uksouth') $true 'image: names the version and region'
+$r2 = Invoke-ImageCheck $tlDef '[{"name":"1.0.0","regions":["UK South"],"exclude":false,"state":"Succeeded"},{"name":"1.1.0","regions":["UK South","West Europe"],"exclude":false,"state":"Succeeded"}]'
+Assert-Equal $r2 '' 'image: replicated Trusted Launch image passes'
+$r3 = Invoke-ImageCheck '{"gen":"V2","state":"Generalized","features":[]}' '[{"name":"1.0.0","regions":["UK South"],"exclude":false,"state":"Succeeded"}]'
+Assert-Equal ((($global:HostBuffer) -join "`n") -match 'Trusted Launch needs TrustedLaunchSupported') $true 'image: definition without Trusted Launch support is caught'
+Remove-Item $imgParams -ErrorAction SilentlyContinue
+$global:AzResponses = $null
+
 # Update-SessionHostConfig: one running, one deallocated host
 Write-Host "`n== Update-SessionHostConfig.ps1 (az mocked)" -ForegroundColor Cyan
 $updateScript = Join-Path $repo 'scripts/Update-SessionHostConfig.ps1'

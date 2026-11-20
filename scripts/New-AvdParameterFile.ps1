@@ -457,11 +457,16 @@ $pilotDefault = [math]::Min($hostsNeeded, 400)
 $pilot = Read-Int -Key 'initialHostCount' -Prompt "Hosts to deploy in the first run (pilot, max 400 per run), or $hostsNeeded for all" -Default $pilotDefault -Min 0 -Max $hostsNeeded
 $imageChoice = Read-Choice -Key 'imageSource' -Prompt 'Session host image:' -Options @('marketplace', 'gallery') -Default 'marketplace'
 $galleryImageId = ''
+$vmSecurityType = 'TrustedLaunch'
 $marketplaceSku = 'win11-24h2-avd-m365'
 if ($imageChoice -eq 'gallery') {
+    Write-Note 'Use the image DEFINITION ID to always deploy the latest version, or a /versions/<x.y.z> ID to pin one.'
     $galleryImageId = Read-Answer -Key 'galleryImageId' -Prompt 'Compute Gallery image definition or version resource ID' -Validate {
         param($x) Test-ResourceId $x 'Microsoft.Compute/galleries'
     }
+    Write-Note 'Trusted Launch needs a Gen2 image whose definition security type is TrustedLaunchSupported or TrustedLaunch.'
+    $tl = Read-YesNo -Key 'imageTrustedLaunch' -Prompt 'Does the image support Trusted Launch?' -Default $true
+    $vmSecurityType = if ($tl) { 'TrustedLaunch' } else { 'Standard' }
 }
 else {
     $marketplaceSku = Read-Answer -Key 'marketplaceSku' -Prompt 'Marketplace SKU (office-365 offer)' -Default 'win11-24h2-avd-m365'
@@ -795,6 +800,7 @@ $lines += @(
     "param imageReference = $imageBicep"
     "param availabilityZones = $(ConvertTo-BicepArray (Split-List $zones))"
     "param encryptionAtHost = $(ConvertTo-BicepBool $encryptionAtHost)"
+    "param vmSecurityType = $(ConvertTo-BicepString $vmSecurityType)"
     "param localAdminUsername = $(ConvertTo-BicepString $localAdminUsername)"
     "param localAdminPassword = readEnvironmentVariable('AVD_LOCAL_ADMIN_PASSWORD')"
     ''
