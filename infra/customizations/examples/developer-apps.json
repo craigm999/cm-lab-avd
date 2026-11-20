@@ -1,0 +1,41 @@
+{
+  "_readme": "Example 'apps' entries for developer tools. Copy the entries you want into infra/customizations/customizations.json, then run scripts/Add-CustomizationApp.ps1 -Name '<name>' -Url '<current version URL>' -Replace to set the real sha256 (and move to the current version). The versions below are examples only.",
+  "apps": [
+    {
+      "name": "Visual Studio Code",
+      "url": "https://update.code.visualstudio.com/1.95.3/win32-x64/stable",
+      "fileName": "VSCodeSetup-x64.exe",
+      "arguments": "/VERYSILENT /NORESTART /MERGETASKS=!runcode",
+      "sha256": "SET-ME-WITH-Add-CustomizationApp.ps1",
+      "detectPath": "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+      "registry": [
+        {
+          "path": "HKLM:\\SOFTWARE\\Policies\\Microsoft\\VSCode",
+          "name": "UpdateMode",
+          "value": "none",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "name": "Git",
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/Git-2.47.1-64-bit.exe",
+      "arguments": "/VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS",
+      "sha256": "SET-ME-WITH-Add-CustomizationApp.ps1",
+      "detectPath": "C:\\Program Files\\Git\\cmd\\git.exe"
+    },
+    {
+      "name": "IntelliJ IDEA Community",
+      "url": "https://download.jetbrains.com/idea/ideaIC-2024.3.exe",
+      "arguments": "/S /CONFIG={dir}\\silent.config /D=C:\\Program Files\\JetBrains\\IntelliJ IDEA Community Edition",
+      "sha256": "SET-ME-WITH-Add-CustomizationApp.ps1",
+      "detectPath": "C:\\Program Files\\JetBrains\\IntelliJ IDEA Community Edition\\bin\\idea64.exe",
+      "files": [
+        {
+          "name": "silent.config",
+          "content": "mode=admin\nlauncher32=0\nlauncher64=1\nupdatePATH=0\nupdateContextMenu=0\njre32=0\n"
+        }
+      ]
+    }
+  ]
+}

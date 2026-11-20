@@ -85,6 +85,18 @@ These are handled by the Azure host and aren't affected by the template's `0.0.0
 | Windows Update, Microsoft Defender, Microsoft 365 Apps / Teams / OneDrive | various | Use Microsoft's published Microsoft 365 endpoint list and the `WindowsUpdate` FQDN tag. The image includes Microsoft 365 Apps. |
 | Trusted Launch guest attestation | TCP 443 | The `GuestAttestation` extension reports boot integrity to Microsoft Azure Attestation. The Microsoft pages I checked don't list its endpoints. Allowing the `AzureAttestation` service tag is the usual approach. If it's blocked, sign-in still works but Defender for Cloud raises boot-integrity alerts. |
 
+### Build-time app downloads (`customizations.json`)
+
+Hosts download installers listed under `apps` during their build. Allow the download hosts on TCP 443. Redirect targets can change, so check firewall logs if a download fails:
+
+| App | Hosts |
+|---|---|
+| VS Code | `update.code.visualstudio.com`, `vscode.download.prss.microsoft.com` |
+| Git for Windows (GitHub releases) | `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` |
+| JetBrains IDEs | `download.jetbrains.com`, `download-cdn.jetbrains.com` |
+
+To keep the allow list short, upload installers to your own storage account and point `url` at it.
+
 ### RDP Shortpath (UDP) for better session quality
 
 This is optional: without UDP, sessions fall back to TCP 443. With UDP they're noticeably better for latency and media.

@@ -710,6 +710,72 @@ if ($env:OS -eq 'Windows_NT') {
     catch { $failures.Add("Customize-SessionHost dry run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 }
 
+# Developer-apps example: dry run of the shipped example file on Windows
+if ($env:OS -eq 'Windows_NT') {
+    Write-Host "`n== Customize-SessionHost.ps1 developer-apps example (Windows, dry run)" -ForegroundColor Cyan
+    $exJson = Get-Content -Raw (Join-Path $repo 'infra/customizations/examples/developer-apps.json')
+    $b64ex = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($exJson))
+    try {
+        $exOut = (& (Join-Path $repo 'infra/scripts/Customize-SessionHost.ps1') -ConfigBase64 $b64ex -DryRun 'True' | Out-String)
+        Microsoft.PowerShell.Utility\Write-Host $exOut
+        Assert-Equal ($exOut -match "App 'Visual Studio Code': \[dry-run\] download \S+ as VSCodeSetup-x64\.exe") $true 'dev apps: VS Code fileName override used'
+        Assert-Equal ($exOut -match 'VSCode\\UpdateMode = none') $true 'dev apps: VS Code update policy planned'
+        Assert-Equal ($exOut -match "write \S*avdapp-IntelliJIDEACommunity\\silent\.config") $true 'dev apps: JetBrains silent.config written next to installer'
+        Assert-Equal ($exOut -match '/CONFIG=\S*avdapp-IntelliJIDEACommunity\\silent\.config') $true 'dev apps: {dir} replaced in arguments'
+        Assert-Equal ($exOut -match '\{dir\}') $false 'dev apps: no unreplaced {dir}'
+        Assert-Equal ($exOut -match "App 'Git': \[dry-run\]") $true 'dev apps: Git planned'
+    }
+    catch { $failures.Add("Developer apps dry run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
+    # URL with no file name and no fileName -> refused, counted as a failure
+    $bad = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"apps":[{"name":"NoName","url":"https://example.invalid/download?id=1"}]}'))
+    $badOut = (& (Join-Path $repo 'infra/scripts/Customize-SessionHost.ps1') -ConfigBase64 $bad -DryRun 'True' | Out-String)
+    Assert-Equal ($badOut -match "can't tell the installer type") $true 'dev apps: URL without a file name needs fileName'
+}
+
+# Add-CustomizationApp: hash computed from the download; -Replace keeps files/registry
+Write-Host "`n== Add-CustomizationApp.ps1 (download mocked)" -ForegroundColor Cyan
+function global:Invoke-WebRequest {
+    param($Uri, $OutFile, [switch] $UseBasicParsing)
+    [IO.File]::WriteAllText($OutFile, "fake installer from $Uri")
+}
+$addScript = Join-Path $repo 'scripts/Add-CustomizationApp.ps1'
+$tmpCfg = Join-Path ([IO.Path]::GetTempPath()) ('cust-' + [guid]::NewGuid().ToString('N') + '.json')
+Copy-Item (Join-Path $repo 'infra/customizations/customizations.json') $tmpCfg
+function Get-ExpectedHash([string] $u) {
+    $f = [IO.Path]::GetTempFileName(); [IO.File]::WriteAllText($f, "fake installer from $u")
+    $h = (Get-FileHash $f -Algorithm SHA256).Hash; Remove-Item $f; return $h
+}
+try {
+    $u1 = 'https://update.code.visualstudio.com/1.95.3/win32-x64/stable'
+    & $addScript -Name 'Visual Studio Code' -Url $u1 -FileName 'VSCodeSetup-x64.exe' -Arguments '/VERYSILENT' -DetectPath 'C:\Program Files\Microsoft VS Code\Code.exe' -ConfigPath $tmpCfg
+    $c1 = Get-Content -Raw $tmpCfg | ConvertFrom-Json
+    $vs = @($c1.apps | Where-Object { $_.name -eq 'Visual Studio Code' })
+    Assert-Equal $vs.Count 1 'add app: entry added'
+    Assert-Equal $vs[0].sha256 (Get-ExpectedHash $u1) 'add app: SHA-256 of the downloaded file recorded'
+    Assert-Equal $vs[0].fileName 'VSCodeSetup-x64.exe' 'add app: fileName kept for extension-less URL'
+    Assert-Equal (@($c1.optimize.removeAppxPackages).Count -gt 5) $true 'add app: rest of the config preserved'
+
+    # hand-add a registry setting, then bump the version with -Replace
+    $c1.apps[0] | Add-Member -NotePropertyName registry -NotePropertyValue @([pscustomobject]@{ path = 'HKLM:\SOFTWARE\Policies\Microsoft\VSCode'; name = 'UpdateMode'; value = 'none'; type = 'String' })
+    [IO.File]::WriteAllText($tmpCfg, ($c1 | ConvertTo-Json -Depth 10))
+    $u2 = 'https://update.code.visualstudio.com/1.96.0/win32-x64/stable'
+    & $addScript -Name 'Visual Studio Code' -Url $u2 -Replace -ConfigPath $tmpCfg
+    $c2 = Get-Content -Raw $tmpCfg | ConvertFrom-Json
+    $vs2 = @($c2.apps | Where-Object { $_.name -eq 'Visual Studio Code' })
+    Assert-Equal $vs2.Count 1 'add app -Replace: still one entry'
+    Assert-Equal $vs2[0].url $u2 'add app -Replace: new URL'
+    Assert-Equal $vs2[0].sha256 (Get-ExpectedHash $u2) 'add app -Replace: new hash'
+    Assert-Equal "$(@($vs2[0].registry)[0].value)" 'none' 'add app -Replace: registry settings kept'
+    Assert-Equal $vs2[0].arguments '/VERYSILENT' 'add app -Replace: arguments kept'
+
+    $threw = $null
+    try { & $addScript -Name 'Visual Studio Code' -Url $u2 -ConfigPath $tmpCfg } catch { $threw = "$_" }
+    Assert-Equal ($threw -match 'already exists') $true 'add app: duplicate needs -Replace'
+}
+catch { $failures.Add("Add-CustomizationApp threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+finally { Remove-Item $tmpCfg -ErrorAction SilentlyContinue; Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue }
+
 Remove-Item Function:\az -ErrorAction SilentlyContinue
 
 # --- Scenario C: personal (1:1) desktops, direct assignment ------------------------

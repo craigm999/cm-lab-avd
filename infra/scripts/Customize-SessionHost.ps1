@@ -14,7 +14,10 @@
       harden   : LLMNR off, AutoRun off, LSA protection, WDigest off, Defender PUA
                  protection (+ optional network protection), firewall on, logon auditing
       apps     : downloaded and installed silently - MSI or EXE, optional SHA-256 check,
-                 optional detectPath to skip apps that are already installed
+                 optional detectPath to skip apps that are already installed,
+                 fileName (URLs without a file name), files (inline config files written
+                 next to the installer; reference the folder as {dir} in arguments) and
+                 registry (settings applied after install, e.g. update policies)
 
     -DryRun prints what would be done without changing anything.
     Log: C:\ProgramData\AvdCustomization\customize.log
@@ -95,19 +98,30 @@ if (Get-Prop $hard 'enabled' $false) {
 foreach ($app in @(Get-Prop $config 'apps' @())) {
     $name = Get-Prop $app 'name' 'app'
     $url = Get-Prop $app 'url' ''
-    $installArgs = Get-Prop $app 'arguments' ''
+    $installArgs = [string](Get-Prop $app 'arguments' '')
     $sha = Get-Prop $app 'sha256' ''
     $detect = Get-Prop $app 'detectPath' ''
     if (-not $url) { Log "App '$name': no url - skipped"; continue }
     if ($detect -and (Test-Path -LiteralPath ([Environment]::ExpandEnvironmentVariables($detect)))) { Log "App '$name': already installed ($detect) - skipped"; continue }
-    $fileName = [IO.Path]::GetFileName(([uri]$url).AbsolutePath)
+    # fileName: needed when the URL has no file name in it (e.g. VS Code's download link).
+    $fileName = Get-Prop $app 'fileName' ''
+    if (-not $fileName) { $fileName = [IO.Path]::GetFileName(([uri]$url).AbsolutePath) }
+    if ($fileName -notmatch '\.(msi|exe)$') { Log "App '$name': can't tell the installer type from '$fileName' - set fileName (e.g. setup.exe) in the config"; $script:failures++; continue }
     $isMsi = $fileName -match '\.msi$'
+    $work = Join-Path $env:TEMP ('avdapp-' + ($name -replace '[^A-Za-z0-9]', ''))
+    $installArgs = $installArgs.Replace('{dir}', $work)           # {dir} = folder holding the installer and any 'files'
+    $extraFiles = @(Get-Prop $app 'files' @())
+    $regs = @(Get-Prop $app 'registry' @())
     if ($dry) {
-        Log ("App '{0}': [dry-run] download {1}{2}, install {3} {4}" -f $name, $url, $(if ($sha) { ' (SHA-256 checked)' } else { ' (NO hash check)' }), $(if ($isMsi) { 'msiexec /i /qn /norestart' } else { 'exe' }), $installArgs)
+        Log ("App '{0}': [dry-run] download {1} as {2}{3}, install {4} {5}" -f $name, $url, $fileName, $(if ($sha) { ' (SHA-256 checked)' } else { ' (NO hash check)' }), $(if ($isMsi) { 'msiexec /i /qn /norestart' } else { 'exe' }), $installArgs)
+        foreach ($f in $extraFiles) { Log "  [dry-run] write $work\$($f.name)" }
+        foreach ($r in $regs) { Set-Reg $r.path $r.name $r.value $(Get-Prop $r 'type' 'DWord') }
         continue
     }
     try {
-        $file = Join-Path $env:TEMP $fileName
+        $null = New-Item -ItemType Directory -Force -Path $work
+        $file = Join-Path $work $fileName
+        foreach ($f in $extraFiles) { Set-Content -LiteralPath (Join-Path $work $f.name) -Value $f.content -Encoding ASCII }
         Log "App '$name': downloading $url"
         Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing
         if ($sha) {
@@ -116,12 +130,15 @@ foreach ($app in @(Get-Prop $config 'apps' @())) {
         }
         else { Log "App '$name': WARNING no sha256 in config - download not verified" }
         if ($isMsi) { $p = Start-Process msiexec.exe -ArgumentList ('/i "{0}" /qn /norestart {1}' -f $file, $installArgs) -Wait -PassThru }
-        else { $p = Start-Process -FilePath $file -ArgumentList $installArgs -Wait -PassThru }
+        elseif ($installArgs) { $p = Start-Process -FilePath $file -ArgumentList $installArgs -Wait -PassThru }
+        else { $p = Start-Process -FilePath $file -Wait -PassThru }
         if (@(0, 3010, 1641) -contains $p.ExitCode) { Log "App '$name': installed (exit $($p.ExitCode))" }
         else { throw "installer exit code $($p.ExitCode)" }
-        Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+        # registry: settings applied after install, e.g. policies that turn off in-app updaters.
+        foreach ($r in $regs) { Set-Reg $r.path $r.name $r.value $(Get-Prop $r 'type' 'DWord') }
     }
     catch { Log "App '$name': FAILED - $($_.Exception.Message)"; $script:failures++ }
+    finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 if ($script:failures) { Log "$($script:failures) app(s) failed - see above."; exit 1 }

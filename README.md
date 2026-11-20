@@ -279,6 +279,28 @@ Get a file's hash with `(Get-FileHash .\file.msi -Algorithm SHA256).Hash`.
 - **Host access:** the hosts must be able to reach each `url`. Allow it through your firewall, or host installers in your own storage account.
 - **Build time:** every app adds download and install time to each host's build. That's the main argument for a custom image if the list grows.
 
+**Adding apps.** Let the helper download the installer once on your machine, compute its SHA-256 and write the entry:
+
+```powershell
+.\scripts\Add-CustomizationApp.ps1 -Name 'Git' `
+    -Url 'https://github.com/git-for-windows/git/releases/download/v<version>.windows.1/Git-<version>-64-bit.exe' `
+    -Arguments '/VERYSILENT /NORESTART /NOCANCEL /SP-' -DetectPath 'C:\Program Files\Git\cmd\git.exe'
+```
+
+For a new version later, run it again with the new `-Url` and `-Replace`. That updates the hash and keeps the entry's other settings.
+
+Extra fields for installers that need more than a URL:
+
+| Field | Use |
+|---|---|
+| `fileName` | The URL has no file name, e.g. VS Code's `…/win32-x64/stable`. Tells the script it's `VSCodeSetup-x64.exe`. |
+| `files` | Small config files written next to the installer, e.g. JetBrains' `silent.config`. Refer to that folder as `{dir}` in `arguments`. |
+| `registry` | Settings applied after install, e.g. VS Code's `UpdateMode = none` policy. Users on AVD aren't admins, so in-app updaters for machine-wide installs can't work. Update by bumping the version instead. |
+
+[`infra/customizations/examples/developer-apps.json`](infra/customizations/examples/developer-apps.json) has working entries for **VS Code** (system installer + update policy), **Git** and **IntelliJ IDEA Community** (`silent.config` for an all-users install). Its versions are examples. Copy the entries into `customizations.json`, then run `Add-CustomizationApp.ps1 -Name … -Url <current version> -Replace` for each to set the real hash. Until then the placeholder hash makes the install refuse to run. Other JetBrains IDEs use the same pattern with their own download URL. Paid editions need licences. Check each vendor's silent-install documentation for the switches your version supports.
+
+**Optimisation tools (VDOT / WDOT).** The Virtual Desktop Optimization Tool says on its project page that it has been superseded by the Windows Desktop Optimization Tool (WDOT) and receives no more updates. It was last tested against Windows 11 23H2. Its known issues include Start menu, Store, Windows Update and OneDrive problems. Microsoft's own VDI optimisation guide is archived (Windows 10 1607). For VM sizes like D4s_v5 the gains are small, so this deployment applies only a light set (`optimize` above). If you want WDOT, run it while **building a custom image**, where you can test it once, not on every host at build time.
+
 **Applying changes to existing hosts.** The JSON is compiled into the template, so new hosts always get the current version. To push it to hosts that already exist:
 
 ```powershell
