@@ -149,6 +149,9 @@ param encryptionAtHost bool = false
 ])
 param vmSecurityType string = 'TrustedLaunch'
 
+@description('Run build-time customisation on each new session host (optimisation, hardening, apps) from infra/customizations/customizations.json, before the host registers. Re-apply to existing hosts with scripts/Update-SessionHostConfig.ps1 -Customize.')
+param applyCustomizations bool = true
+
 @description('Local administrator user name for the session hosts (break-glass only; users sign in with Entra ID).')
 param localAdminUsername string = 'avdadmin'
 
@@ -308,6 +311,8 @@ var allTags = union(tags, {
 })
 
 var isPersonal = hostPoolType == 'Personal'
+// Shared with scripts/Update-SessionHostConfig.ps1 -Customize, so build and re-apply match.
+var customizationConfig = loadJsonContent('customizations/customizations.json')
 // Pooled: integer ceiling division of users by sessions per host. Personal: one VM per user.
 var requiredSessionHosts = isPersonal ? targetUserCount : (targetUserCount + maxSessionsPerHost - 1) / maxSessionsPerHost
 var sessionHostCount = sessionHostCountOverride >= 0 ? sessionHostCountOverride : requiredSessionHosts
@@ -529,6 +534,8 @@ module sessionHosts 'modules/sessionhost.bicep' = [
       osDiskSizeGB: osDiskSizeGB
       encryptionAtHost: encryptionAtHost
       securityType: vmSecurityType
+      applyCustomizations: applyCustomizations
+      customizationConfig: customizationConfig
       adminUsername: localAdminUsername
       adminPassword: localAdminPassword
       hostPoolResourceGroupName: rgServiceName

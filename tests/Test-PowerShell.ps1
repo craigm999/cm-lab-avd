@@ -509,6 +509,22 @@ Assert-Equal ((($global:HostBuffer) -join "`n") -match 'Trusted Launch needs Tru
 Remove-Item $imgParams -ErrorAction SilentlyContinue
 $global:AzResponses = $null
 
+# Update-SessionHostConfig -Customize: pushes the customisation script with the shared JSON config
+Write-Host "`n== Update-SessionHostConfig.ps1 -Customize (az mocked)" -ForegroundColor Cyan
+$global:AzResponses = $null
+$global:MockVmPower = '[{"name":"avdpd-001","power":"VM running"}]'
+$global:AzCalls.Clear()
+try {
+    & (Join-Path $repo 'scripts/Update-SessionHostConfig.ps1') -ResourceGroup 'rg-hosts' -Customize
+    $create = @($global:AzCalls | Where-Object { $_ -like 'vm run-command create*' })
+    Assert-Equal ($create.Count -eq 1 -and $create[0] -match '--name Customize-SessionHost --script @\S+Customize-SessionHost\.ps1 --parameters ConfigBase64=') $true 'customize: customisation run command pushed'
+    $b64 = [regex]::Match($create[0], 'ConfigBase64=(\S+)').Groups[1].Value
+    $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))
+    Assert-Equal ($decoded -match 'removeAppxPackages') $true 'customize: shared customizations.json sent'
+    Assert-Equal ($create[0] -match '--timeout-in-seconds 5400') $true 'customize: longer timeout for app installs'
+}
+catch { $failures.Add("Update-SessionHostConfig -Customize threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+
 # Update-SessionHostConfig: one running, one deallocated host
 Write-Host "`n== Update-SessionHostConfig.ps1 (az mocked)" -ForegroundColor Cyan
 $updateScript = Join-Path $repo 'scripts/Update-SessionHostConfig.ps1'
@@ -674,6 +690,24 @@ if ($env:OS -eq 'Windows_NT') {
         Remove-Item $fakeLog -ErrorAction SilentlyContinue
         if ($created) { Remove-Item 'C:\ProgramData\FSLogix' -Recurse -Force -ErrorAction SilentlyContinue }
     }
+}
+
+# Customize-SessionHost: dry run on Windows (no changes) with the real config plus a sample app
+if ($env:OS -eq 'Windows_NT') {
+    Write-Host "`n== Customize-SessionHost.ps1 (Windows, dry run)" -ForegroundColor Cyan
+    $cfg = Get-Content -Raw (Join-Path $repo 'infra/customizations/customizations.json') | ConvertFrom-Json
+    $cfg.apps = @([pscustomobject]@{ name = '7-Zip'; url = 'https://example.invalid/7z.msi'; arguments = ''; sha256 = 'ABC'; detectPath = 'C:\definitely-not-installed\7z.exe' })
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($cfg | ConvertTo-Json -Depth 10)))
+    try {
+        $dryOut = (& (Join-Path $repo 'infra/scripts/Customize-SessionHost.ps1') -ConfigBase64 $b64 -DryRun 'True' | Out-String)
+        Microsoft.PowerShell.Utility\Write-Host $dryOut
+        Assert-Equal ($dryOut -match 'DRY RUN') $true 'customize dry run: announced'
+        Assert-Equal ($dryOut -match 'remove Appx package Microsoft\.BingNews') $true 'customize dry run: appx removal planned'
+        Assert-Equal ($dryOut -match 'EnableMulticast = 0') $true 'customize dry run: hardening planned'
+        Assert-Equal ($dryOut -match "App '7-Zip': \[dry-run\] download .*SHA-256 checked.*msiexec") $true 'customize dry run: app install planned with hash check'
+        Assert-Equal (Test-Path 'C:\ProgramData\AvdCustomization\customize.log') $false 'customize dry run: nothing written'
+    }
+    catch { $failures.Add("Customize-SessionHost dry run threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 }
 
 Remove-Item Function:\az -ErrorAction SilentlyContinue

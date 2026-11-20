@@ -36,12 +36,16 @@ param(
     [string[]] $VmName,
     [switch] $IncludeStopped,
     [switch] $DisableFslogix,
+    [switch] $Customize,
     [int] $TimeoutMinutes = 30
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Customize -and -not $PSBoundParameters.ContainsKey('TimeoutMinutes')) { $TimeoutMinutes = 90 }
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $configScript = Join-Path (Join-Path (Join-Path $repoRoot 'infra') 'scripts') 'Configure-SessionHost.ps1'
+$customizeScript = Join-Path (Join-Path (Join-Path $repoRoot 'infra') 'scripts') 'Customize-SessionHost.ps1'
+$customizationsFile = Join-Path (Join-Path (Join-Path $repoRoot 'infra') 'customizations') 'customizations.json'
 
 function Test-Az {
     $azArgs = $args
@@ -76,13 +80,15 @@ if ($ParameterFile) {
 if ($ProfileSizeMB -le 0) { $ProfileSizeMB = 30000 }
 if (-not $ResourceGroup) { throw 'Session host resource group unknown - pass -ResourceGroup.' }
 $fslogix = -not $DisableFslogix
+if ($Customize) { $fslogix = $false }   # -Customize pushes only the customisation script
 if ($fslogix -and -not $VhdLocation) {
     throw 'FSLogix share path unknown (deployment outputs have no fslogixUncPath). Deploy FSLogix storage first, pass -VhdLocation, or use -DisableFslogix.'
 }
 
 Write-Host ''
 Write-Host "  Resource group : $ResourceGroup"
-Write-Host ('  FSLogix        : {0}' -f $(if ($fslogix) { "$VhdLocation ($ProfileSizeMB MB max)" } else { 'not configured (Kerberos settings only)' }))
+if ($Customize) { Write-Host "  Pushing        : customisation (optimisation, hardening, apps) from $customizationsFile" }
+else { Write-Host ('  FSLogix        : {0}' -f $(if ($fslogix) { "$VhdLocation ($ProfileSizeMB MB max)" } else { 'not configured (Kerberos settings only)' })) }
 Write-Host ''
 
 # ------------------------------------------------------------------ Hosts
@@ -117,11 +123,20 @@ if (-not $running.Count) { throw 'No running hosts to configure.' }
 
 # ------------------------------------------------------------------ Push run command
 Write-Step "Applying configuration to $($running.Count) host(s)"
-$parameters = @("FslogixEnabled=$fslogix", "VhdLocation=$(if ($fslogix) { $VhdLocation } else { '' })", "ProfileSizeMB=$ProfileSizeMB")
+if ($Customize) {
+    # Same JSON the template compiles in, so re-applying matches what new hosts get.
+    $json = (Get-Content -Raw -LiteralPath $customizationsFile | ConvertFrom-Json | ConvertTo-Json -Depth 10 -Compress)
+    $parameters = @("ConfigBase64=$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))")
+    $commandName = 'Customize-SessionHost'; $scriptPath = $customizeScript; $timeout = 5400
+}
+else {
+    $parameters = @("FslogixEnabled=$fslogix", "VhdLocation=$(if ($fslogix) { $VhdLocation } else { '' })", "ProfileSizeMB=$ProfileSizeMB")
+    $commandName = 'Configure-SessionHost'; $scriptPath = $configScript; $timeout = 1800
+}
 $started = @()
 foreach ($n in $running) {
-    $r = Test-Az vm run-command create --resource-group $ResourceGroup --vm-name $n --name Configure-SessionHost `
-        --script "@$configScript" --parameters @parameters --timeout-in-seconds 1800 --no-wait --only-show-errors
+    $r = Test-Az vm run-command create --resource-group $ResourceGroup --vm-name $n --name $commandName `
+        --script "@$scriptPath" --parameters @parameters --timeout-in-seconds $timeout --no-wait --only-show-errors
     if ($r.Ok) { $started += $n; Write-Host "  queued $n" } else { Write-Host "  FAILED to queue $n" -ForegroundColor Red }
 }
 
@@ -130,7 +145,7 @@ $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
 $results = @{}
 while ($started.Count -and (Get-Date) -lt $deadline) {
     foreach ($n in @($started)) {
-        $s = Test-Az vm run-command show --resource-group $ResourceGroup --vm-name $n --name Configure-SessionHost --instance-view --query 'instanceView.executionState' -o tsv --only-show-errors
+        $s = Test-Az vm run-command show --resource-group $ResourceGroup --vm-name $n --name $commandName --instance-view --query 'instanceView.executionState' -o tsv --only-show-errors
         if ($s.Ok -and $s.Output -in @('Succeeded', 'Failed', 'TimedOut', 'Canceled')) {
             $results[$n] = $s.Output
             $started = @($started | Where-Object { $_ -ne $n })
@@ -149,7 +164,8 @@ foreach ($k in ($results.Keys | Sort-Object)) {
 foreach ($n in $stopped) { Write-Host ('  {0,-20} skipped (stopped)' -f $n) -ForegroundColor Yellow }
 Write-Host ''
 if ($failed) {
-    Write-Host "$failed host(s) failed. Details: az vm run-command show -g $ResourceGroup --vm-name <vm> --name Configure-SessionHost --instance-view" -ForegroundColor Red
+    Write-Host "$failed host(s) failed. Details: az vm run-command show -g $ResourceGroup --vm-name <vm> --name $commandName --instance-view" -ForegroundColor Red
     exit 1
 }
-Write-Host 'Done. New settings apply at each user''s next sign-in.' -ForegroundColor Green
+if ($Customize) { Write-Host 'Done. Restart hosts (out of hours) if an installer or the LSA protection setting needs it.' -ForegroundColor Green }
+else { Write-Host 'Done. New settings apply at each user''s next sign-in.' -ForegroundColor Green }

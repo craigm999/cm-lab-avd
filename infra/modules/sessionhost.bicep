@@ -3,7 +3,8 @@
 // Extension order:
 //   1. AADLoginForWindows  - joins the VM to Microsoft Entra ID. No `mdmId` setting is
 //                            passed, so the device is NOT enrolled in Intune.
-//   2. Run command         - FSLogix + Entra Kerberos configuration. Runs BEFORE the
+//   2. Run command         - FSLogix + Entra Kerberos configuration, then (optionally)
+//                            Customize-SessionHost: optimisation, hardening, apps. Runs BEFORE the
 //                            agent registers, so no user can land on a half-configured
 //                            host and autoscale can't stop it mid-build.
 //   3. DSC (AVD agent)     - installs the AVD agent + boot loader and registers the VM
@@ -34,6 +35,11 @@ param avdAgentDscPackageUrl string
 param fslogixEnabled bool
 param fslogixVhdLocation string
 param fslogixProfileSizeMB int
+@description('Run infra/scripts/Customize-SessionHost.ps1 during the build.')
+param applyCustomizations bool = false
+
+@description('Customisation settings (infra/customizations/customizations.json).')
+param customizationConfig object = {}
 param tags object = {}
 
 resource hostPool 'Microsoft.DesktopVirtualization/hostPools@2024-04-03' existing = {
@@ -201,6 +207,31 @@ resource configure 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = 
   ]
 }
 
+// 2b. Customisation: optimisation, hardening and apps (infra/customizations/customizations.json).
+//     Still before registration, so users only ever land on finished desktops.
+resource customize 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = if (applyCustomizations) {
+  parent: vm
+  name: 'Customize-SessionHost'
+  location: location
+  properties: {
+    source: {
+      script: loadTextContent('../scripts/Customize-SessionHost.ps1')
+    }
+    parameters: [
+      {
+        name: 'ConfigBase64'
+        value: base64(string(customizationConfig))
+      }
+    ]
+    asyncExecution: false
+    treatFailureAsDeploymentFailure: true
+    timeoutInSeconds: 5400
+  }
+  dependsOn: [
+    configure
+  ]
+}
+
 // 3. AVD agent install + host pool registration.
 resource avdAgent 'Microsoft.Compute/virtualMachines/extensions@2024-07-01' = {
   parent: vm
@@ -235,6 +266,7 @@ resource avdAgent 'Microsoft.Compute/virtualMachines/extensions@2024-07-01' = {
   }
   dependsOn: [
     configure
+    customize
   ]
 }
 

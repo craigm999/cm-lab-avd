@@ -251,6 +251,53 @@ The type of an existing host pool can't be changed, so a personal deployment cre
 - **Image:** the default Windows 11 *multi-session* + Microsoft 365 image works for personal pools. For single-session, set `imageReference` to e.g. `MicrosoftWindowsDesktop` / `windows-11` / `win11-24h2-ent` (no Microsoft 365 Apps preinstalled).
 - **Start VM on Connect** is enabled. It needs the AVD service principal's *Power On Off Contributor* role, which the deployment assigns when `avdServicePrincipalObjectId` is set.
 
+## Customising session hosts (apps, optimisation, hardening)
+
+Each new host is customised **during its build**, after the Entra join and profile configuration and **before** the AVD agent registers it. Users only ever land on finished desktops. Everything is driven by one file, [`infra/customizations/customizations.json`](infra/customizations/customizations.json), and the script [`infra/scripts/Customize-SessionHost.ps1`](infra/scripts/Customize-SessionHost.ps1). Turn it off with `applyCustomizations = false`.
+
+| Section | What it does |
+|---|---|
+| `optimize` | Turns off consumer features, tips and the first-logon animation. Removes the built-in Appx packages listed in `removeAppxPackages` (Xbox, Solitaire, Clipchamp, …). Edit the list to keep any you want. |
+| `harden` | Turns off LLMNR, AutoRun and WDigest cleartext credentials. Turns on LSA protection, Defender PUA protection, the firewall (all profiles) and logon auditing. `defenderNetworkProtection: true` adds Defender network protection; test it with your apps first. |
+| `apps` | Downloads and silently installs MSI or EXE installers. **Give a `sha256` for each one**: the script refuses a download whose hash doesn't match. Use `detectPath` to skip apps that are already installed. |
+
+Example `apps` entry:
+
+```json
+"apps": [
+  {
+    "name": "7-Zip",
+    "url": "https://www.7-zip.org/a/7z2409-x64.msi",
+    "arguments": "",
+    "sha256": "<SHA-256 of that file>",
+    "detectPath": "C:\\Program Files\\7-Zip\\7z.exe"
+  }
+]
+```
+
+Get a file's hash with `(Get-FileHash .\file.msi -Algorithm SHA256).Hash`.
+- **Host access:** the hosts must be able to reach each `url`. Allow it through your firewall, or host installers in your own storage account.
+- **Build time:** every app adds download and install time to each host's build. That's the main argument for a custom image if the list grows.
+
+**Applying changes to existing hosts.** The JSON is compiled into the template, so new hosts always get the current version. To push it to hosts that already exist:
+
+```powershell
+.\scripts\Update-SessionHostConfig.ps1 -ParameterFile .\infra\params\prod.bicepparam -Customize -IncludeStopped
+```
+
+It runs the same script on each host as the `Customize-SessionHost` run command, and the script is safe to re-run. Restart hosts afterwards, out of hours, if an installer or LSA protection needs it. Log on each host: `C:\ProgramData\AvdCustomization\customize.log`.
+
+**Build scripts vs a custom image:**
+
+| | Build scripts (this) | Custom image |
+|---|---|---|
+| Upkeep | None: always the current Microsoft image | An image pipeline to rebuild, typically monthly |
+| Build time | Grows with the app list | Fast |
+| Consistency | Depends on download sources staying available | Identical every time |
+| Existing personal desktops | Same scripts can be re-pushed | No effect |
+
+Start with build scripts. Move to an image (for example Azure Image Builder running these same scripts) if build times or download reliability become a problem. Neither keeps apps up to date on existing desktops. Without Intune, re-push with `-Customize`, use apps' own updaters (Microsoft 365 Apps updates itself), and use Azure Update Manager for Windows patches.
+
 ## Custom images
 
 `imageReference` takes either a marketplace image or an **Azure Compute Gallery** image. Microsoft recommends the gallery for production, for replication and versioning.

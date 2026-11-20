@@ -70,6 +70,10 @@ check "VM security type is parameterised (Trusted Launch or Standard for custom 
 check "Guest attestation only deployed with Trusted Launch" \
   'any(.[]; .type=="Microsoft.Compute/virtualMachines/extensions" and .properties.type?=="GuestAttestation" and (.condition|tostring|test("TrustedLaunch")))'
 if jq -e '.outputs.desktopAppGroupId and .outputs.desktopFriendlyName' "$T" >/dev/null; then pass "outputs for setting the desktop display name"; else fail "outputs for setting the desktop display name"; fi
+check "Customisation runs after host config and BEFORE the agent registers" \
+  'any(.[]; .type=="Microsoft.Compute/virtualMachines/extensions" and .properties.type?=="DSC" and ((.dependsOn // []) | map(tostring) | any(test("Customize-SessionHost"))))'
+check "Customisation config compiled in from customizations.json" \
+  'any(.[]; .type=="Microsoft.Compute/virtualMachines/runCommands" and (.name|tostring|test("Customize-SessionHost")) and (.properties.parameters|tostring|test("customizationConfig")))'
 check "AVD agent runs after Entra join (dependsOn chain)" \
   'any(.[]; .properties.type?=="DSC" and ((.dependsOn // []) | length) > 0)'
 check "Session host VM has SystemAssigned identity" \
