@@ -88,9 +88,9 @@ Write-Host "Automation account: $account ($rg), mode: $($config.mode)"
 
 # ------------------------------------------------------------------ 1. Template spec
 Write-Step 'Publishing the session host template spec (avd-sessionhost 1.0)'
-$ts = Test-Az ts create --name avd-sessionhost --version 1.0 --resource-group $rg --location $location --template-file $sessionHostTemplate --description 'AVD session host (used by the pool maintenance runbook)' --yes --only-show-errors
+$ts = Test-Az ts create --name avd-sessionhost --version '1.0' --resource-group $rg --location $location --template-file $sessionHostTemplate --description 'AVD session host (used by the pool maintenance runbook)' --yes --only-show-errors
 if (-not $ts.Ok) { throw 'Creating the template spec failed (needs az CLI with Bicep).' }
-$tsId = (Test-Az ts show --name avd-sessionhost --version 1.0 --resource-group $rg --query id -o tsv --only-show-errors).Output
+$tsId = (Test-Az ts show --name avd-sessionhost --version '1.0' --resource-group $rg --query id -o tsv --only-show-errors).Output
 if (-not $tsId) { throw 'Could not read the template spec ID.' }
 $config | Add-Member -NotePropertyName templateSpecVersionId -NotePropertyValue $tsId -Force
 

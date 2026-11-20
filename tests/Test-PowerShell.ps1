@@ -245,7 +245,7 @@ function global:az {
     }
     $bi2 = [array]::IndexOf([string[]]$args, '--body')
     $ui2 = [array]::IndexOf([string[]]$args, '--url')
-    if ($bi2 -ge 0 -and $ui2 -ge 0 -and $global:BodyLog) {
+    if ($bi2 -ge 0 -and $ui2 -ge 0 -and $null -ne $global:BodyLog) {   # an empty list is falsy
         $global:BodyLog.Add([pscustomobject]@{ Line = $line; Url = "$($args[$ui2 + 1])"; Body = (Get-Content -Raw -LiteralPath ("$($args[$bi2 + 1])".TrimStart('@'))) })
     }
     if ($line -like 'rest --method patch*') {
@@ -841,8 +841,8 @@ try {
     $env:AVD_LOCAL_ADMIN_PASSWORD = 'Auto-Passw0rd!x'
     $app = (& $runbook -ConfigPath $cfgFile -Mode Apply -NowUtc '2026-11-20T12:00:00Z' | Out-String)
     $dels = @($global:RestCalls | Where-Object { $_.Method -eq 'DELETE' } | ForEach-Object { $_.Uri })
-    Assert-Equal ($dels.Count -eq 2 -and $dels[0] -like "$pool/sessionHosts/avdpd-002?*force=true" -and $dels[1] -like "$vmBase/avdpd-002?*") $true 'pool apply: session host then VM deleted'
-    Assert-Equal (@($global:RestCalls | Where-Object { $_.Method -eq 'PATCH' -and $_.Uri -like "$pool?*" -and "$($_.Body)" -match 'registrationTokenOperation' }).Count) 1 'pool apply: registration token refreshed'
+    Assert-Equal ($dels.Count -eq 2 -and $dels[0] -like "*$($pool)/sessionHosts/avdpd-002``?*force=true" -and $dels[1] -like "*$($vmBase)/avdpd-002``?*") $true 'pool apply: session host then VM deleted'
+    Assert-Equal (@($global:RestCalls | Where-Object { $_.Method -eq 'PATCH' -and $_.Uri -like "*$($pool)``?api-version*" -and "$($_.Body)" -match 'registrationTokenOperation' }).Count) 1 'pool apply: registration token refreshed'
     $deps = @($global:RestCalls | Where-Object { $_.Method -eq 'PUT' -and $_.Uri -like '*/deployments/avd-auto-*' })
     Assert-Equal $deps.Count 2 'pool apply: two desktops deployed'
     Assert-Equal ("$($deps[0].Body)" -match '"vmName":\{"value":"avdpd-008"\}' -and "$($deps[0].Body)" -match '"zone":\{"value":"2"\}' -and "$($deps[0].Body)" -match '"id":"ts-id"' -and "$($deps[0].Body)" -match '"adminPassword":\{"value":"Auto-Passw0rd!x"\}') $true 'pool apply: deployment uses the template spec, name, zone and password'
