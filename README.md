@@ -384,8 +384,13 @@ These steps can't be expressed in ARM/Bicep. Run them once after the first deplo
    - **Users group:** Modify, this folder only
 4. **Enable Entra SSO for the tenant.** This step is **required if any users are guests**. Members can skip it, but they then get an extra sign-in prompt:
    ```powershell
-   ./scripts/Enable-EntraSSO.ps1 -TargetDeviceGroupId <device group id>
+   .\scripts\Enable-EntraSSO.ps1 -SessionHostPrefix avdpd
    ```
+   `-SessionHostPrefix` creates (or reuses) a **dynamic device group**, *AVD Session Hosts*, with the rule `(device.displayName -startsWith "avdpd-")`. Every session host joins it automatically, including ones added later. The script then trusts that group, which removes the *Allow remote desktop connection?* prompt.
+   - **Several prefixes:** list them all, e.g. `-SessionHostPrefix avdsh, avdpd`.
+   - **Dynamic groups need Entra ID P1.** Without it, create a normal security group, add the session host devices, and pass `-TargetDeviceGroupId <object ID>`.
+   - **Finding an existing group's ID:** *Entra ID → Groups → the group → Overview → Object ID*, or run `az ad group show --group "AVD Session Hosts" --query id -o tsv`.
+   - **Requirement:** the Microsoft Graph PowerShell modules (`Install-Module Microsoft.Graph -Scope CurrentUser`).
 5. **Check a host:** run `.\scripts\Get-FslogixHostDiagnostics.ps1 -ParameterFile .\infra\params\prod.bicepparam -VmName avdsh-001`. See *Profiles fail to load at sign-in* below.
 
 ### Profiles fail to load at sign-in
