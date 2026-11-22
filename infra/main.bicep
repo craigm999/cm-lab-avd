@@ -326,6 +326,15 @@ param existingLogAnalyticsWorkspaceId string = ''
 @description('[new] Log Analytics retention in days.')
 param logAnalyticsRetentionDays int = 30
 
+// ----------------------------------------------------------------------------- Microsoft Defender for Cloud
+@description('Defender for Servers plan for this SUBSCRIPTION (covers every VM in it, not only AVD). P1 = Defender for Endpoint (EDR) deployed to each VM automatically; P2 adds vulnerability assessment, file integrity monitoring and more. None = leave the subscription as it is (the template never turns a plan off). Billed per VM-hour while VMs run.')
+@allowed([
+  'None'
+  'P1'
+  'P2'
+])
+param defenderForServersPlan string = 'None'
+
 // =====================================================================================
 // Variables
 // =====================================================================================
@@ -369,6 +378,30 @@ var existingVnetId = newNetwork ? '' : substring(existingSessionHostSubnetId, 0,
 // Fallbacks keep the (skipped) hub peering module's scope valid when no hub is given.
 var hubSubscriptionId = empty(hubVnetId) ? subscription().subscriptionId : split(hubVnetId, '/')[2]
 var hubResourceGroupName = empty(hubVnetId) ? rgNetworkName : split(hubVnetId, '/')[4]
+
+// =====================================================================================
+// Microsoft Defender for Cloud (subscription level)
+// =====================================================================================
+resource defenderForServers 'Microsoft.Security/pricings@2024-01-01' = if (defenderForServersPlan != 'None') {
+  name: 'VirtualMachines'
+  properties: {
+    pricingTier: 'Standard'
+    subPlan: defenderForServersPlan
+  }
+}
+
+// Defender for Endpoint integration: Defender for Cloud installs and onboards the MDE agent
+// on each VM (MDE.Windows extension), so session hosts appear in the Defender portal.
+resource defenderEndpointIntegration 'Microsoft.Security/settings@2022-05-01' = if (defenderForServersPlan != 'None') {
+  name: 'WDATP'
+  kind: 'DataExportSettings'
+  properties: {
+    enabled: true
+  }
+  dependsOn: [
+    defenderForServers
+  ]
+}
 
 // =====================================================================================
 // Resource groups
@@ -704,6 +737,7 @@ output sessionHostDeployment object = {
   zones: availabilityZones
   sessionHostParameters: automationSessionHostParameters
 }
+output defenderForServersPlan string = defenderForServersPlan
 output automationAccountName string = deployAutomation ? automation!.outputs.name : ''
 output automationResourceGroup string = deployAutomation ? rgServiceName : ''
 output automationConfig object = deployAutomation

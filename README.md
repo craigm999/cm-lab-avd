@@ -417,6 +417,60 @@ OneDrive's `AllowTenantList` blocks syncing another organisation's OneDrive inde
 - **Your own tenant's data leaving through allowed channels**, such as the clipboard (still allowed) or email. Microsoft Purview DLP (endpoint DLP) covers that, with onboarding and E5-level licensing.
 - **Screenshots and photos of the screen.** AVD has *screen capture protection* and *watermarking* for this; they can be added the same way if you want them.
 
+## Microsoft 365 apps (Teams, OneDrive, Office)
+
+The default image (`office-365` / `win11-24h2-avd-m365`) includes Microsoft 365 Apps, the new Teams and OneDrive, and Teams and OneDrive start at sign-in. Two ways to remove them:
+
+- **Remove them during the build** (also works on existing hosts). Set this in the `m365Apps` block of [`customizations.json`](infra/customizations/customizations.json):
+  ```json
+  "m365Apps": { "removeTeams": true, "removeOneDrive": true, "removeOffice": false }
+  ```
+  - **Teams:** removes the Teams package for all users and for new profiles, plus the older Teams Machine-Wide Installer if it's present.
+  - **OneDrive:** uninstalls it, removes its sign-in start-up entries, and sets *Prevent the usage of OneDrive for file storage*. OneDrive can't run even if a copy comes back with an update.
+  - **Office:** runs Microsoft 365 Apps' own uninstaller silently. It's `false` by default; set it to `true` if users shouldn't have Word, Excel or Outlook either.
+
+  New hosts get this at build. To apply it to existing hosts, run the following. A user who already has a profile may need to sign out and back in.
+  ```powershell
+  .\scripts\Update-SessionHostConfig.ps1 -ParameterFile .\infra\params\prod.bicepparam -Customize -IncludeStopped
+  ```
+- **Use the plain Windows image** for new hosts. Answer *No* to *"Include Microsoft 365 Apps?"* in the questionnaire, or set this in the parameter file:
+  ```bicep
+  param imageReference = {
+    publisher: 'MicrosoftWindowsDesktop'
+    offer: 'windows-11'
+    sku: 'win11-24h2-avd'
+    version: 'latest'
+  }
+  ```
+  Nothing needs removing, and builds are a little quicker. Existing hosts keep their image; use the removal option above for them, or replace them as described in *Custom images*.
+
+## Microsoft Defender
+
+**Microsoft Defender Antivirus** is built into Windows. The `defender` block in `customizations.json` (on by default) enforces it as policy, so a user can't turn it off:
+- real-time and behaviour monitoring, and scanning of downloads;
+- cloud-delivered protection with automatic sample submission;
+- blocking of potentially unwanted apps;
+- optional network protection (`networkProtection`);
+- a signature update at build.
+
+When FSLogix is on, `Configure-SessionHost.ps1` also adds Microsoft's recommended Defender exclusions for FSLogix: the container files and FSLogix's drivers. This avoids slow sign-ins and locked profiles; content inside the profile is still scanned.
+
+**Microsoft Defender for Cloud / Defender for Endpoint** is optional. Set the Defender for Servers plan in the parameter file:
+```bicep
+param defenderForServersPlan = 'P1'   // None | P1 | P2
+```
+- **P1:** Defender for Cloud installs and onboards **Defender for Endpoint** (EDR) on every VM automatically. Hosts then appear in the Microsoft Defender portal with alerts, device timeline and response actions.
+- **P2:** adds vulnerability assessment, file integrity monitoring, just-in-time access and more.
+- **It's set for the whole subscription**, so it covers every VM in it, not only AVD. Billing is per VM-hour while VMs are running; deallocated desktops aren't charged. See [Defender for Cloud pricing](https://azure.microsoft.com/pricing/details/defender-for-cloud/).
+- **`None` (the default) leaves the subscription as it is.** The template never turns a plan off or changes it unless you set it. If your security team already manages Defender for Cloud centrally, leave it at `None`, and don't set `P1` on a subscription that is already on `P2`.
+- Apply it with `Deploy-Avd.ps1 -InfraOnly`. Defender for Endpoint onboarding happens in the background and can take a few hours after enabling.
+- Check Microsoft's list of supported operating systems for Defender for Endpoint with Defender for Cloud (Windows 11 Enterprise multi-session) before relying on it: [supported platforms](https://learn.microsoft.com/azure/defender-for-cloud/support-matrix-defender-for-servers).
+
+**Check a host:** `Get-HostDataProtectionReport.ps1 -VmName <vm>` now also shows:
+- Defender Antivirus status: mode, real-time protection, signature age and tamper protection;
+- whether Defender for Endpoint is onboarded;
+- which Microsoft 365 apps are still installed.
+
 ## Custom images
 
 `imageReference` takes either a marketplace image or an **Azure Compute Gallery** image. Microsoft recommends the gallery for production, for replication and versioning.

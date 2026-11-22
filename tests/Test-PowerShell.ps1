@@ -173,6 +173,8 @@ if ($p) {
     Assert-Equal $p.tags.value.note "it's `${x}" 'A tag value escaping'
     Assert-Equal ($p.availabilityZones.value -join ',') '1,2,3' 'A zones'
     Assert-Equal $p.imageReference.value.sku 'win11-24h2-avd-m365' 'A image sku'
+    Assert-Equal $p.imageReference.value.offer 'office-365' 'A image with Microsoft 365 Apps (default)'
+    Assert-Equal $p.defenderForServersPlan.value 'None' 'A Defender for Servers left alone (default)'
 }
 
 # --- Scenario B: new spoke VNet, hub peering, firewall, shared RG ----------------
@@ -849,6 +851,11 @@ if ($env:OS -eq 'Windows_NT') {
         Assert-Equal ($dryOut -match 'DRY RUN') $true 'customize dry run: announced'
         Assert-Equal ($dryOut -match 'remove Appx package Microsoft\.BingNews') $true 'customize dry run: appx removal planned'
         Assert-Equal ($dryOut -match 'EnableMulticast = 0') $true 'customize dry run: hardening planned'
+        Assert-Equal ($dryOut -match 'remove Teams: MSTeams') $true 'customize dry run: Teams removal planned'
+        Assert-Equal ($dryOut -match 'OneDrive\\DisableFileSyncNGSC = 1') $true 'customize dry run: OneDrive blocked by policy'
+        Assert-Equal ($dryOut -match 'uninstall OneDrive') $true 'customize dry run: OneDrive uninstall planned'
+        Assert-Equal ($dryOut -match 'Microsoft 365 Apps not installed|\[dry-run\] uninstall Microsoft 365') $false 'customize dry run: Office kept (removeOffice false)'
+        Assert-Equal ($dryOut -match 'Real-Time Protection\\DisableRealtimeMonitoring = 0') $true 'customize dry run: Defender real-time enforced'
         Assert-Equal ($dryOut -match "App '7-Zip': \[dry-run\] download .*SHA-256 checked.*msiexec") $true 'customize dry run: app install planned with hash check'
         Assert-Equal (Test-Path 'C:\ProgramData\AvdCustomization\customize.log') $false 'customize dry run: nothing written'
     }
@@ -988,6 +995,45 @@ if ($env:OS -eq 'Windows_NT') {
             $state = if ($written[$vn] -eq $enabledVal) { 'Enabled' } elseif ($written[$vn] -eq $disabledVal) { 'Disabled' } else { "unknown($($written[$vn]))" }
             $name = $strings[($pol.displayName -replace '^\$\(string\.(.+)\)$', '$1')]
             Assert-Equal "$name = $state" "$($expected[$vn][0]) = $($expected[$vn][1])" "redirection: $vn"
+        }
+    }
+}
+
+# Defender and OneDrive policy: every value the script writes is checked against Windows' own
+# policy definitions on this machine (key + value name, and an allowed value for enums).
+if ($env:OS -eq 'Windows_NT') {
+    Write-Host "`n== Defender / OneDrive policy vs Windows ADMX (Windows)" -ForegroundColor Cyan
+    function Find-AdmxValue([xml] $Admx, [string] $Key, [string] $ValueName) {
+        foreach ($node in $Admx.SelectNodes('//*[@valueName]')) {
+            if ($node.GetAttribute('valueName') -ne $ValueName) { continue }
+            $k = $node.GetAttribute('key'); $n = $node
+            while (-not $k -and $n.ParentNode -is [System.Xml.XmlElement]) { $n = $n.ParentNode; $k = $n.GetAttribute('key') }
+            if ($k -eq $Key) { return $node }
+        }
+        return $null
+    }
+    $cfgText = Get-Content -Raw (Join-Path $repo 'infra/customizations/customizations.json')
+    $dOut = (& (Join-Path $repo 'infra/scripts/Customize-SessionHost.ps1') -ConfigBase64 ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cfgText))) -DryRun 'True' | Out-String)
+    $checks = @(
+        @('WindowsDefender.admx', 'SOFTWARE\\Policies\\Microsoft\\Windows Defender[^=\r\n]*'),
+        @('SkyDrive.admx', 'SOFTWARE\\Policies\\Microsoft\\Windows\\OneDrive')
+    )
+    foreach ($c in $checks) {
+        $admxFile = Join-Path $env:WINDIR "PolicyDefinitions\$($c[0])"
+        $found = [regex]::Matches($dOut, '\[dry-run\] HKLM:\\(' + $c[1] + ')\\(\w+) = (\d+)')
+        if (-not (Test-Path $admxFile)) {
+            if ($c[0] -eq 'WindowsDefender.admx') { $failures.Add('WindowsDefender.admx not found on the runner') }
+            else { Microsoft.PowerShell.Utility\Write-Host "  skip $($c[0]) not on this Windows edition" -ForegroundColor DarkGray }
+            continue
+        }
+        [xml]$ax = Get-Content -Raw $admxFile
+        if (-not $found.Count) { $failures.Add("no values written for $($c[0])") }
+        foreach ($m in $found) {
+            $key = $m.Groups[1].Value; $vn = $m.Groups[2].Value; $val = [int]$m.Groups[3].Value
+            $node = Find-AdmxValue $ax $key $vn
+            $ok = [bool]$node
+            if ($ok -and $node.LocalName -eq 'enum') { $ok = @($node.SelectNodes('*[local-name()="item"]/*[local-name()="value"]/*[local-name()="decimal"]') | ForEach-Object { [int]$_.GetAttribute('value') }) -contains $val }
+            Assert-Equal $ok $true "policy: $key\$vn = $val defined in $($c[0])"
         }
     }
 }
@@ -1183,6 +1229,8 @@ $p = Invoke-Scenario 'personal 1:1 desktops' 'cipd' @(
     , @('Desktop type', 'Personal')
     , @('Number of users', '50')
     , @('Desktop assignment', 'Direct')
+    , @('Include Microsoft 365 Apps', 'n')
+    , @('Defender for Servers plan', 'P1')
     , @('Log Analytics workspace:', 'new')
     , @('already exist', 'n')
     , @('AVD users group', '11111111-1111-1111-1111-111111111111')
@@ -1195,6 +1243,8 @@ if ($p) {
     Assert-Equal $p.vmSize.value 'Standard_D4s_v5' 'C personal VM size default'
     Assert-Equal $p.deployFslogixStorage.value $false 'C FSLogix off by default for personal'
     Assert-Equal $p.sessionHostCountOverride.value -1 'C all 50 desktops in first run'
+    Assert-Equal "$($p.imageReference.value.offer)/$($p.imageReference.value.sku)" 'windows-11/win11-24h2-avd' 'C plain Windows image (no Microsoft 365 Apps)'
+    Assert-Equal $p.defenderForServersPlan.value 'P1' 'C Defender for Servers P1'
 }
 
 Remove-Item (Join-Path $paramsDir 'ci*') -ErrorAction SilentlyContinue

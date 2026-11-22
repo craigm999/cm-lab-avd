@@ -18,6 +18,10 @@
       dataProtection : block Microsoft (personal) accounts on Windows, OneDrive sync only
                  for your tenant (no personal OneDrive), Edge sign-in pattern and URL block
                  list, and optionally Entra Tenant Restrictions v2 (Windows policy)
+      m365Apps : remove the new Teams, OneDrive (plus the policy that stops it running) and/or
+                 Microsoft 365 Apps from the -m365 marketplace image
+      defender : Microsoft Defender Antivirus enforced as policy (real-time, behaviour,
+                 cloud protection, PUA, optional network protection) + signature update
       apps     : downloaded and installed silently - MSI or EXE, optional SHA-256 check,
                  optional detectPath to skip apps that are already installed,
                  fileName (URLs without a file name), files (inline config files written
@@ -224,6 +228,99 @@ if ($null -ne $dp) {
     }
 }
 
+# ---------------------------------------------------------------- Microsoft 365 apps
+# The win11-*-avd-m365 marketplace image ships Microsoft 365 Apps, OneDrive (per-machine)
+# and the new Teams (an MSIX provisioned for every new profile). Each can be removed.
+$m365 = Get-Prop $config 'm365Apps' $null
+if ($null -ne $m365) {
+    Log 'Microsoft 365 apps'
+    if (Get-Prop $m365 'removeTeams' $false) {
+        if ($dry) { Log '  [dry-run] remove Teams: MSTeams package (all users + provisioned), Teams Machine-Wide Installer' }
+        else {
+            try {
+                Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq 'MSTeams' } | Remove-AppxProvisionedPackage -Online -AllUsers -ErrorAction SilentlyContinue | Out-Null
+                Get-AppxPackage -AllUsers -Name 'MSTeams' -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+                foreach ($u in @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Teams Machine-Wide Installer' })) {
+                    $p = Start-Process msiexec.exe -ArgumentList "/x $($u.PSChildName) /qn /norestart" -Wait -PassThru
+                    Log "  Teams Machine-Wide Installer removed (exit $($p.ExitCode))"
+                }
+                Log '  Teams removed'
+            }
+            catch { Log "  Teams: FAILED - $($_.Exception.Message)"; $script:failures++ }
+        }
+    }
+    if (Get-Prop $m365 'removeOneDrive' $false) {
+        # "Prevent the usage of OneDrive for file storage": OneDrive won't run even if a copy remains.
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 1
+        if ($dry) { Log '  [dry-run] uninstall OneDrive (per-machine) and remove its autostart entries' }
+        else {
+            try {
+                Get-Process OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                $setup = @(Get-ChildItem "$env:ProgramFiles\Microsoft OneDrive" -Filter OneDriveSetup.exe -Recurse -ErrorAction SilentlyContinue) + @(Get-Item "$env:WINDIR\System32\OneDriveSetup.exe" -ErrorAction SilentlyContinue) | Select-Object -First 1
+                if ($setup) {
+                    $p = Start-Process $setup.FullName -ArgumentList '/uninstall /allusers' -Wait -PassThru
+                    Log "  OneDrive uninstalled (exit $($p.ExitCode))"
+                }
+                else { Log '  OneDrive not installed' }
+                Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue
+                # New profiles: the default profile's Run key installs OneDrive per user at first sign-in.
+                $null = reg.exe load 'HKU\AvdDefaultUser' $DefaultUserHive
+                try { Remove-ItemProperty 'Registry::HKEY_USERS\AvdDefaultUser\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDriveSetup' -ErrorAction SilentlyContinue }
+                finally { [gc]::Collect(); [gc]::WaitForPendingFinalizers(); $null = reg.exe unload 'HKU\AvdDefaultUser' }
+            }
+            catch { Log "  OneDrive: FAILED - $($_.Exception.Message)"; $script:failures++ }
+        }
+    }
+    if (Get-Prop $m365 'removeOffice' $false) {
+        # Microsoft 365 Apps (Click-to-Run): its own uninstall command, run silently.
+        $c2r = @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { "$($_.UninstallString)" -match 'OfficeClickToRun\.exe' })
+        if (-not $c2r.Count) { Log '  Microsoft 365 Apps not installed' }
+        foreach ($o in $c2r) {
+            if ($dry) { Log "  [dry-run] uninstall $($o.DisplayName)"; continue }
+            try {
+                if ("$($o.UninstallString)" -notmatch '^"([^"]+)"\s*(.*)$') { throw "unexpected uninstall command: $($o.UninstallString)" }
+                $p = Start-Process $Matches[1] -ArgumentList ($Matches[2] + ' DisplayLevel=False') -Wait -PassThru
+                Log "  $($o.DisplayName) uninstalled (exit $($p.ExitCode))"
+            }
+            catch { Log "  $($o.DisplayName): FAILED - $($_.Exception.Message)"; $script:failures++ }
+        }
+    }
+}
+
+# ---------------------------------------------------------------- Microsoft Defender Antivirus
+# Built into Windows. Set as policy (WindowsDefender.admx values) so a user can't switch it
+# off, plus a signature update so a new host starts current.
+$def = Get-Prop $config 'defender' $null
+if (Get-Prop $def 'enabled' $false) {
+    Log 'Microsoft Defender Antivirus'
+    $wd = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+    if (-not $dry) {
+        # Left behind by some optimisation tools; either one turns Defender off.
+        foreach ($n in 'DisableAntiSpyware', 'DisableAntiVirus') { Remove-ItemProperty $wd -Name $n -ErrorAction SilentlyContinue }
+    }
+    Set-Reg "$wd\Real-Time Protection" 'DisableRealtimeMonitoring' 0
+    Set-Reg "$wd\Real-Time Protection" 'DisableBehaviorMonitoring' 0
+    Set-Reg "$wd\Real-Time Protection" 'DisableIOAVProtection' 0          # scan downloads and attachments
+    if (Get-Prop $def 'cloudProtection' $true) {
+        Set-Reg "$wd\Spynet" 'SpynetReporting' 2                            # cloud-delivered protection (Advanced MAPS)
+        Set-Reg "$wd\Spynet" 'SubmitSamplesConsent' 1                       # send safe samples automatically
+    }
+    if (Get-Prop $def 'puaProtection' $true) { Set-Reg $wd 'PUAProtection' 1 }
+    if (Get-Prop $def 'networkProtection' $false) { Set-Reg "$wd\Windows Defender Exploit Guard\Network Protection" 'EnableNetworkProtection' 1 }
+    if ($dry) { Log '  [dry-run] update signatures; report Defender status' }
+    else {
+        if (Get-Prop $def 'updateSignatures' $true) {
+            try { Update-MpSignature -ErrorAction Stop; Log '  signatures updated' } catch { Log "  signature update failed (Defender retries on its own) - $($_.Exception.Message)" }
+        }
+        try {
+            $st = Get-MpComputerStatus
+            Log ("  status: mode {0}, real-time {1}, signatures {2} day(s) old" -f $st.AMRunningMode, $st.RealTimeProtectionEnabled, $st.AntivirusSignatureAge)
+            if ($st.AMRunningMode -ne 'Normal') { Log '  NOTE: Defender is not in Normal (active) mode - another antivirus product may be installed' }
+        }
+        catch { Log "  could not read Defender status - $($_.Exception.Message)" }
+    }
+}
+
 # ---------------------------------------------------------------- Applications
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 foreach ($app in @(Get-Prop $config 'apps' @())) {
@@ -272,5 +369,5 @@ foreach ($app in @(Get-Prop $config 'apps' @())) {
     finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-if ($script:failures) { Log "$($script:failures) app(s) failed - see above."; exit 1 }
+if ($script:failures) { Log "$($script:failures) step(s) failed - see above."; exit 1 }
 Log 'Session host customisation complete.'

@@ -53,6 +53,25 @@ else {
     }
 }
 
+# ---------------------------------------------------------------- Microsoft 365 apps
+$teams = try { @(Get-AppxPackage -AllUsers -Name 'MSTeams' -ErrorAction Stop).Count -gt 0 } catch { $false }
+$oneDrive = (Test-Path "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe") -or (Test-Path "${env:ProgramFiles(x86)}\Microsoft OneDrive\OneDrive.exe")
+$oneDriveBlocked = (Get-Val 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC') -eq 1
+$office = Test-Path "$env:ProgramFiles\Microsoft Office\root\Office16\WINWORD.EXE"
+Line INFO ("Installed: Teams {0}, OneDrive {1}{2}, Microsoft 365 Apps {3}" -f $(if ($teams) { 'yes' } else { 'no' }), $(if ($oneDrive) { 'yes' } else { 'no' }), $(if ($oneDriveBlocked) { ' (blocked by policy)' } else { '' }), $(if ($office) { 'yes' } else { 'no' }))
+
+# ---------------------------------------------------------------- Microsoft Defender
+try {
+    $mp = Get-MpComputerStatus -ErrorAction Stop
+    $avOk = $mp.AMServiceEnabled -and $mp.RealTimeProtectionEnabled -and $mp.AMRunningMode -eq 'Normal'
+    Line $(if ($avOk) { 'OK' } else { 'FAIL' }) ("Defender Antivirus: mode {0}, real-time {1}, signatures {2} day(s) old, tamper protection {3}" -f $mp.AMRunningMode, $mp.RealTimeProtectionEnabled, $mp.AntivirusSignatureAge, $mp.IsTamperProtected)
+    if ($mp.AntivirusSignatureAge -gt 3) { Line WARN 'Defender signatures are more than 3 days old - check outbound access to Microsoft update endpoints' }
+}
+catch { Line FAIL "Defender Antivirus status unavailable - $($_.Exception.Message)" }
+$mde = Get-Val 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status' 'OnboardingState'
+if ($mde -eq 1) { Line OK 'Defender for Endpoint: onboarded' }
+else { Line INFO 'Defender for Endpoint: not onboarded (defenderForServersPlan = P1/P2 onboards it via Defender for Cloud; allow a few hours after enabling)' }
+
 # ---------------------------------------------------------------- Signed-in users (loaded profiles)
 $sids = @(Get-ChildItem 'Registry::HKEY_USERS' | Where-Object { $_.PSChildName -match '^S-1-12-1-[\d-]+$' } | ForEach-Object { $_.PSChildName })
 if (-not $sids.Count) { Line INFO 'No Entra users signed in right now - sign a test user in and re-run to see their OneDrive state' }

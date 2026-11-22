@@ -54,5 +54,19 @@
       "firewallProtection": false
     }
   },
+  "m365Apps": {
+    "_comment": "Removes Microsoft 365 apps that ship in the win11-*-avd-m365 image. OneDrive removal also sets the policy that stops OneDrive running at all. For new hosts without any of them, use the plain Windows image instead (README: Microsoft 365 apps).",
+    "removeTeams": true,
+    "removeOneDrive": true,
+    "removeOffice": false
+  },
+  "defender": {
+    "_comment": "Microsoft Defender Antivirus (built into Windows), enforced as policy so users cannot turn it off. Defender for Endpoint / Defender for Cloud: defenderForServersPlan in the parameter file.",
+    "enabled": true,
+    "cloudProtection": true,
+    "puaProtection": true,
+    "networkProtection": false,
+    "updateSignatures": true
+  },
   "apps": []
 }

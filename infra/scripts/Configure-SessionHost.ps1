@@ -54,6 +54,16 @@ if ([System.Convert]::ToBoolean($FslogixEnabled) -and -not [string]::IsNullOrWhi
             Add-LocalGroupMember -Group $group -Member $localAdmin -ErrorAction SilentlyContinue
         }
     }
+    # Microsoft Defender exclusions recommended for FSLogix: scanning the container files
+    # themselves slows sign-in and can lock them (content inside is still scanned in-session).
+    $share = $VhdLocation.TrimEnd('\')
+    $exclusions = @('%ProgramFiles%\FSLogix\Apps\frxdrv.sys', '%ProgramFiles%\FSLogix\Apps\frxdrvvt.sys', '%ProgramFiles%\FSLogix\Apps\frxccd.sys')
+    foreach ($ext in 'VHD', 'VHDX') {
+        $exclusions += "%TEMP%\*\*.$ext", "%Windir%\TEMP\*\*.$ext"
+        foreach ($suffix in '', '.lock', '.meta', '.metadata') { $exclusions += "$share\*\*.$ext$suffix" }
+    }
+    try { Add-MpPreference -ExclusionPath $exclusions -ErrorAction Stop; Write-Output 'Defender exclusions for FSLogix added.' }
+    catch { Write-Output "Defender exclusions for FSLogix not added: $($_.Exception.Message)" }
     Write-Output "FSLogix configured: $VhdLocation"
 }
 else {

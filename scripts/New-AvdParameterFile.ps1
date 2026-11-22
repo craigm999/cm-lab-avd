@@ -454,11 +454,12 @@ if ($networkMode -eq 'existing') {
 }
 
 $pilotDefault = [math]::Min($hostsNeeded, 400)
-$pilot = Read-Int -Key 'initialHostCount' -Prompt "Hosts to deploy in the first run (pilot, max 400 per run), or $hostsNeeded for all" -Default $pilotDefault -Min 0 -Max $hostsNeeded
+$pilot = Read-Int -Key 'initialHostCount' -Prompt "Hosts to deploy in the first run (pilot), or $hostsNeeded for all" -Default $pilotDefault -Min 0 -Max $hostsNeeded
 $imageChoice = Read-Choice -Key 'imageSource' -Prompt 'Session host image:' -Options @('marketplace', 'gallery') -Default 'marketplace'
 $galleryImageId = ''
 $vmSecurityType = 'TrustedLaunch'
 $marketplaceSku = 'win11-24h2-avd-m365'
+$marketplaceOffer = 'office-365'
 if ($imageChoice -eq 'gallery') {
     Write-Note 'Use the image DEFINITION ID to always deploy the latest version, or a /versions/<x.y.z> ID to pin one.'
     $galleryImageId = Read-Answer -Key 'galleryImageId' -Prompt 'Compute Gallery image definition or version resource ID' -Validate {
@@ -469,7 +470,10 @@ if ($imageChoice -eq 'gallery') {
     $vmSecurityType = if ($tl) { 'TrustedLaunch' } else { 'Standard' }
 }
 else {
-    $marketplaceSku = Read-Answer -Key 'marketplaceSku' -Prompt 'Marketplace SKU (office-365 offer)' -Default 'win11-24h2-avd-m365'
+    Write-Note 'Without Microsoft 365 Apps: plain Windows 11 multi-session - no Office, Teams or OneDrive to remove later.'
+    $withM365 = Read-YesNo -Key 'imageWithM365Apps' -Prompt 'Include Microsoft 365 Apps (Office, Teams, OneDrive) in the image?' -Default $true
+    $marketplaceOffer = if ($withM365) { 'office-365' } else { 'windows-11' }
+    $marketplaceSku = Read-Answer -Key 'marketplaceSku' -Prompt "Marketplace SKU ($marketplaceOffer offer)" -Default $(if ($withM365) { 'win11-24h2-avd-m365' } else { 'win11-24h2-avd' })
 }
 $zones = Read-Answer -Key 'availabilityZones' -Prompt "Availability zones (comma separated, '-' for none)" -Default '1,2,3' -AllowEmpty -Validate {
     param($x) foreach ($z in (Split-List $x)) { if ($z -notmatch '^[1-3]$') { return 'Zones must be 1, 2 and/or 3.' } }
@@ -688,6 +692,12 @@ if ($deployScalingPlan) {
     if (-not $avdSpId) { Write-Warn 'No AVD service principal ID: the scaling plan will not be able to power hosts on/off until the role is assigned.' }
 }
 
+Write-Section 'Microsoft Defender for Cloud'
+Write-Note 'Microsoft Defender Antivirus runs on every host regardless (customizations.json: defender).'
+Write-Note 'Defender for Servers adds Defender for Endpoint (EDR) on each VM. It applies to the WHOLE subscription and is billed per VM-hour while VMs run.'
+Write-Note 'None leaves the subscription as it is (choose None if it is already set centrally).'
+$defenderPlan = Read-Choice -Key 'defenderForServersPlan' -Prompt 'Defender for Servers plan:' -Options @('None', 'P1', 'P2') -Default 'None'
+
 # =====================================================================================
 # Write output
 # =====================================================================================
@@ -698,6 +708,7 @@ $summary = [ordered]@{
     'Network'           = if ($networkMode -eq 'existing') { "existing: $existingSessionHostSubnetId" } else { "new: $vnetName $vnetAddressPrefix" }
     'Session hosts'     = if ($isPersonal) { "Personal 1:1 ($personalAssignmentType): $hostsNeeded x $vmSize ($pilot in first run)" } else { "Pooled: $hostsNeeded x $vmSize ($pilot in first run), $maxSessionsPerHost users each" }
     'Log Analytics'     = if ($logAnalyticsMode -eq 'existing') { $existingLogAnalyticsWorkspaceId } else { 'new' }
+    'Defender servers'  = $(if ($defenderPlan -eq 'None') { 'not changed' } else { "$defenderPlan (whole subscription)" })
     'FSLogix'           = if (-not $deployFslogix) { 'not deployed' } elseif ($fslogixNetworkAccess -eq 'serviceEndpoint') { "$fslogixShareQuotaGiB GiB $fslogixStorageSku, service endpoint (no private DNS)" } else { "$fslogixShareQuotaGiB GiB $fslogixStorageSku, private endpoint, DNS zone: $privateDnsZoneMode" }
     'RG service'        = "$($rgService.name) (create=$($rgService.create))"
     'RG hosts'          = "$($rgHosts.name) (create=$($rgHosts.create))"
@@ -731,7 +742,7 @@ if ($imageChoice -eq 'gallery') {
     $imageBicep = "{`n  id: $(ConvertTo-BicepString $galleryImageId)`n}"
 }
 else {
-    $imageBicep = "{`n  publisher: 'MicrosoftWindowsDesktop'`n  offer: 'office-365'`n  sku: $(ConvertTo-BicepString $marketplaceSku)`n  version: 'latest'`n}"
+    $imageBicep = "{`n  publisher: 'MicrosoftWindowsDesktop'`n  offer: $(ConvertTo-BicepString $marketplaceOffer)`n  sku: $(ConvertTo-BicepString $marketplaceSku)`n  version: 'latest'`n}"
 }
 
 $countOverride = if ($pilot -eq $hostsNeeded) { -1 } else { $pilot }
@@ -820,6 +831,9 @@ $lines += @(
     "param logAnalyticsMode = $(ConvertTo-BicepString $logAnalyticsMode)"
     "param existingLogAnalyticsWorkspaceId = $(ConvertTo-BicepString $existingLogAnalyticsWorkspaceId)"
     "param logAnalyticsRetentionDays = $logRetention"
+    ''
+    '// ---------------------------------------------------------------- Microsoft Defender for Cloud (whole subscription)'
+    "param defenderForServersPlan = $(ConvertTo-BicepString $defenderPlan)"
     ''
     '// ---------------------------------------------------------------- FSLogix'
     "param deployFslogixStorage = $(ConvertTo-BicepBool $deployFslogix)"
