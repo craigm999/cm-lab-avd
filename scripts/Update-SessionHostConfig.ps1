@@ -155,6 +155,19 @@ while ($started.Count -and (Get-Date) -lt $deadline) {
 }
 foreach ($n in $started) { $results[$n] = 'Unknown (still running at timeout)' }
 
+# What the script itself reported. "Succeeded" only means the run command ran; the script's
+# exit code and log say whether each step worked (a step that fails exits 1).
+$outputs = @{}
+foreach ($n in @($results.Keys)) {
+    if ($results[$n] -notin @('Succeeded', 'Failed')) { continue }
+    $iv = Test-Az vm run-command show --resource-group $ResourceGroup --vm-name $n --name $commandName --instance-view --query '{exit:instanceView.exitCode, output:instanceView.output, error:instanceView.error}' -o json --only-show-errors
+    $ivObj = $null
+    if ($iv.Ok -and $iv.Output) { try { $ivObj = $iv.Output | ConvertFrom-Json } catch { $ivObj = $null } }
+    if (-not $ivObj) { continue }
+    $outputs[$n] = "$($ivObj.output)`n$($ivObj.error)"
+    if ($null -ne $ivObj.exit -and "$($ivObj.exit)" -ne '' -and [int]$ivObj.exit -ne 0) { $results[$n] = "Failed (script exit code $($ivObj.exit))" }
+}
+
 Write-Host ''
 $failed = 0
 foreach ($k in ($results.Keys | Sort-Object)) {
@@ -162,6 +175,16 @@ foreach ($k in ($results.Keys | Sort-Object)) {
     Write-Host ('  {0,-20} {1}' -f $k, $results[$k]) -ForegroundColor $colour
 }
 foreach ($n in $stopped) { Write-Host ('  {0,-20} skipped (stopped)' -f $n) -ForegroundColor Yellow }
+# Host output: everything for a few hosts, otherwise just problems and status lines.
+$showAll = $outputs.Count -le 3
+foreach ($k in ($outputs.Keys | Sort-Object)) {
+    $lines = @("$($outputs[$k])" -split "`r?`n" | Where-Object { $_.Trim() })
+    if (-not $showAll) { $lines = @($lines | Where-Object { $_ -match 'FAILED|NOTE|not installed|still installed|exit [1-9]' }) }
+    if (-not $lines.Count) { continue }
+    Write-Host ''
+    Write-Host "  --- $k ---"
+    foreach ($l in $lines) { Write-Host "  $l" -ForegroundColor $(if ($l -match 'FAILED') { 'Red' } elseif ($l -match 'NOTE|WARNING') { 'Yellow' } else { 'Gray' }) }
+}
 Write-Host ''
 if ($failed) {
     Write-Host "$failed host(s) failed. Details: az vm run-command show -g $ResourceGroup --vm-name <vm> --name $commandName --instance-view" -ForegroundColor Red

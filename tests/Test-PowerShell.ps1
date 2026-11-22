@@ -605,6 +605,22 @@ try {
 }
 catch { $failures.Add("Update-SessionHostConfig -Customize threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
 
+# -Customize where the script ran but a step failed: exit code and the host's own log lines shown
+$global:AzResponses = [ordered]@{
+    'vm run-command show * --query {exit*' = '{"exit":1,"output":"2026-11-22 10:00:00 Microsoft 365 apps\n2026-11-22 10:00:05   MSTeams not removed for all users - Deployment failed with HRESULT: 0x80073D02\n2026-11-22 10:00:06   Teams: FAILED - still installed after removal (see the lines above)","error":""}'
+    'vm run-command show*' = 'Succeeded'
+}
+$global:AzCalls.Clear(); $global:HostBuffer.Clear()
+try {
+    & (Join-Path $repo 'scripts/Update-SessionHostConfig.ps1') -ResourceGroup 'rg-hosts' -Customize
+    $out = ($global:HostBuffer) -join "`n"
+    Assert-Equal ($out -match 'avdpd-001\s+Failed \(script exit code 1\)') $true 'customize: script exit code turns Succeeded into Failed'
+    Assert-Equal ($out -match 'Teams: FAILED - still installed') $true 'customize: host log lines shown'
+    Assert-Equal ($out -match '0x80073D02') $true 'customize: the underlying error is shown'
+}
+catch { $failures.Add("Update-SessionHostConfig -Customize (failed step) threw: $_"); Microsoft.PowerShell.Utility\Write-Host "  FAIL $_" -ForegroundColor Red }
+$global:AzResponses = $null
+
 # Update-SessionHostConfig: one running, one deallocated host
 Write-Host "`n== Update-SessionHostConfig.ps1 (az mocked)" -ForegroundColor Cyan
 $updateScript = Join-Path $repo 'scripts/Update-SessionHostConfig.ps1'
@@ -851,7 +867,8 @@ if ($env:OS -eq 'Windows_NT') {
         Assert-Equal ($dryOut -match 'DRY RUN') $true 'customize dry run: announced'
         Assert-Equal ($dryOut -match 'remove Appx package Microsoft\.BingNews') $true 'customize dry run: appx removal planned'
         Assert-Equal ($dryOut -match 'EnableMulticast = 0') $true 'customize dry run: hardening planned'
-        Assert-Equal ($dryOut -match 'remove Teams: MSTeams') $true 'customize dry run: Teams removal planned'
+        Assert-Equal ($dryOut -match 'remove Teams: stop it, remove MSTeams for every user') $true 'customize dry run: Teams removal planned'
+        Assert-Equal ($dryOut -match 'officeupdate\\PreventTeamsInstall = 1') $true 'customize dry run: Office updates stopped from reinstalling Teams'
         Assert-Equal ($dryOut -match 'OneDrive\\DisableFileSyncNGSC = 1') $true 'customize dry run: OneDrive blocked by policy'
         Assert-Equal ($dryOut -match 'uninstall OneDrive') $true 'customize dry run: OneDrive uninstall planned'
         Assert-Equal ($dryOut -match 'Microsoft 365 Apps not installed|\[dry-run\] uninstall Microsoft 365') $false 'customize dry run: Office kept (removeOffice false)'

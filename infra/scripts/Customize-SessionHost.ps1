@@ -235,40 +235,79 @@ $m365 = Get-Prop $config 'm365Apps' $null
 if ($null -ne $m365) {
     Log 'Microsoft 365 apps'
     if (Get-Prop $m365 'removeTeams' $false) {
-        if ($dry) { Log '  [dry-run] remove Teams: MSTeams package (all users + provisioned), Teams Machine-Wide Installer' }
+        # Office updates install the new Teams on their own unless this policy is set
+        # ("Don't install Microsoft Teams with new installations or updates of Office").
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Office\16.0\common\officeupdate' 'PreventTeamsInstall' 1
+        if ($dry) { Log '  [dry-run] remove Teams: stop it, remove MSTeams for every user and from the image, Teams Machine-Wide Installer' }
         else {
-            try {
-                Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq 'MSTeams' } | Remove-AppxProvisionedPackage -Online -AllUsers -ErrorAction SilentlyContinue | Out-Null
-                Get-AppxPackage -AllUsers -Name 'MSTeams' -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
-                foreach ($u in @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Teams Machine-Wide Installer' })) {
-                    $p = Start-Process msiexec.exe -ArgumentList "/x $($u.PSChildName) /qn /norestart" -Wait -PassThru
-                    Log "  Teams Machine-Wide Installer removed (exit $($p.ExitCode))"
+            # A running Teams can't be removed ("in use") - signed-in users' copies included.
+            Get-Process -Name 'ms-teams', 'ms-teamsupdate', 'msteams', 'Teams' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            foreach ($name in 'MSTeams', 'MicrosoftTeams') {
+                foreach ($prov in @(Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $name })) {
+                    try { $null = Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -AllUsers -ErrorAction Stop; Log "  $name removed from the image (new profiles)" }
+                    catch { Log "  $name not removed from the image - $($_.Exception.Message)" }
                 }
-                Log '  Teams removed'
+                foreach ($pkg in @(Get-AppxPackage -AllUsers -Name $name -ErrorAction SilentlyContinue)) {
+                    try { Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop; Log "  $name removed for all users ($($pkg.Version))" }
+                    catch { Log "  $name not removed for all users - $($_.Exception.Message)" }
+                }
             }
-            catch { Log "  Teams: FAILED - $($_.Exception.Message)"; $script:failures++ }
+            foreach ($u in @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Teams Machine-Wide Installer' })) {
+                $p = Start-Process msiexec.exe -ArgumentList "/x $($u.PSChildName) /qn /norestart" -Wait -PassThru
+                Log "  Teams Machine-Wide Installer removed (exit $($p.ExitCode))"
+            }
+            # Check rather than assume.
+            $left = @(Get-AppxPackage -AllUsers -Name 'MSTeams' -ErrorAction SilentlyContinue) + @(Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq 'MSTeams' })
+            if ($left.Count) { Log '  Teams: FAILED - still installed after removal (see the lines above)'; $script:failures++ }
+            else { Log '  Teams: not installed' }
         }
     }
     if (Get-Prop $m365 'removeOneDrive' $false) {
         # "Prevent the usage of OneDrive for file storage": OneDrive won't run even if a copy remains.
         Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 1
-        if ($dry) { Log '  [dry-run] uninstall OneDrive (per-machine) and remove its autostart entries' }
+        if ($dry) { Log '  [dry-run] uninstall OneDrive (per-machine) and remove its start-up entries for the machine, every profile and new profiles' }
         else {
-            try {
-                Get-Process OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-                $setup = @(Get-ChildItem "$env:ProgramFiles\Microsoft OneDrive" -Filter OneDriveSetup.exe -Recurse -ErrorAction SilentlyContinue) + @(Get-Item "$env:WINDIR\System32\OneDriveSetup.exe" -ErrorAction SilentlyContinue) | Select-Object -First 1
-                if ($setup) {
-                    $p = Start-Process $setup.FullName -ArgumentList '/uninstall /allusers' -Wait -PassThru
-                    Log "  OneDrive uninstalled (exit $($p.ExitCode))"
-                }
-                else { Log '  OneDrive not installed' }
-                Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue
-                # New profiles: the default profile's Run key installs OneDrive per user at first sign-in.
-                $null = reg.exe load 'HKU\AvdDefaultUser' $DefaultUserHive
-                try { Remove-ItemProperty 'Registry::HKEY_USERS\AvdDefaultUser\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDriveSetup' -ErrorAction SilentlyContinue }
-                finally { [gc]::Collect(); [gc]::WaitForPendingFinalizers(); $null = reg.exe unload 'HKU\AvdDefaultUser' }
+            Get-Process -Name 'OneDrive', 'OneDriveStandaloneUpdater', 'FileCoAuth' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            $setup = @(Get-ChildItem "$env:ProgramFiles\Microsoft OneDrive", "${env:ProgramFiles(x86)}\Microsoft OneDrive" -Filter OneDriveSetup.exe -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending) | Select-Object -First 1
+            if ($setup) {
+                $p = Start-Process $setup.FullName -ArgumentList '/uninstall /allusers' -Wait -PassThru
+                Log "  OneDrive (per-machine) uninstall exit $($p.ExitCode)"
             }
-            catch { Log "  OneDrive: FAILED - $($_.Exception.Message)"; $script:failures++ }
+            foreach ($run in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run') {
+                Remove-ItemProperty $run -Name 'OneDrive' -ErrorAction SilentlyContinue
+            }
+            # Start-up entries in user profiles: signed-in users (hive loaded), other profiles
+            # (hive loaded here) and the default profile, which installs OneDrive per user at
+            # first sign-in through 'OneDriveSetup'.
+            $hives = @(@{ Name = 'AvdDefaultUser'; File = $DefaultUserHive })
+            foreach ($prof in @(Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { -not $_.Special -and $_.LocalPath })) {
+                if ($prof.Loaded) { $hives += @{ Root = "Registry::HKEY_USERS\$($prof.SID)" } }
+                elseif (Test-Path (Join-Path $prof.LocalPath 'NTUSER.DAT')) { $hives += @{ Name = "AvdUser$($hives.Count)"; File = (Join-Path $prof.LocalPath 'NTUSER.DAT') } }
+            }
+            $cleaned = 0
+            foreach ($h in $hives) {
+                $root = $h.Root
+                if (-not $root) {
+                    $null = reg.exe load "HKU\$($h.Name)" "$($h.File)"
+                    if ($LASTEXITCODE -ne 0) { continue }
+                    $root = "Registry::HKEY_USERS\$($h.Name)"
+                }
+                try {
+                    foreach ($v in 'OneDrive', 'OneDriveSetup') {
+                        if ($null -ne (Get-ItemProperty "$root\Software\Microsoft\Windows\CurrentVersion\Run" -Name $v -ErrorAction SilentlyContinue)) {
+                            Remove-ItemProperty "$root\Software\Microsoft\Windows\CurrentVersion\Run" -Name $v -ErrorAction SilentlyContinue; $cleaned++
+                        }
+                    }
+                }
+                finally { if (-not $h.Root) { [gc]::Collect(); [gc]::WaitForPendingFinalizers(); $null = reg.exe unload "HKU\$($h.Name)" } }
+            }
+            Log "  OneDrive start-up entries removed: $cleaned"
+            $perUser = @(Get-ChildItem 'C:\Users\*\AppData\Local\Microsoft\OneDrive\OneDrive.exe' -ErrorAction SilentlyContinue)
+            if ($perUser.Count) { Log "  $($perUser.Count) profile(s) have their own OneDrive copy - blocked by policy and no longer started at sign-in" }
+            if (Test-Path "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe") { Log '  OneDrive: FAILED - per-machine copy still installed (policy still blocks it)'; $script:failures++ }
+            else { Log '  OneDrive: not installed per-machine; blocked by policy' }
         }
     }
     if (Get-Prop $m365 'removeOffice' $false) {

@@ -22,7 +22,8 @@ else {
     $idx = [array]::LastIndexOf([string[]]$logLines, "$lastRun")
     $recent = if ($idx -ge 0) { $logLines[$idx..($logLines.Count - 1)] } else { $logLines }
     if (-not ($recent -match 'Data protection')) { Line FAIL 'Last customisation run had NO data protection section - push the current customizations.json (-Customize)' }
-    foreach ($l in ($recent -match 'Tenant restrictions|FAILED')) { Line $(if ($l -match 'FAILED') { 'FAIL' } else { 'INFO' }) ("log: " + ($l -replace '^\S+ \S+\s+', '')) }
+    if (-not ($recent -match 'Microsoft 365 apps')) { Line WARN 'Last customisation run had NO Microsoft 365 apps section - update the repo copy of customizations.json (m365Apps) and push with -Customize' }
+    foreach ($l in ($recent -match 'Tenant restrictions|FAILED|Teams:|OneDrive:')) { Line $(if ($l -match 'FAILED') { 'FAIL' } else { 'INFO' }) ("log: " + ($l -replace '^\S+ \S+\s+', '')) }
     if ("$lastRun" -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})' -and [datetime]$Matches[1] -gt $boot) {
         Line WARN 'Customisation ran AFTER the last restart - restart the host so tenant restrictions and policies take full effect'
     }
