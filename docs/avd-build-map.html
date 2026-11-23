@@ -85,6 +85,7 @@ svg .t-mono { font-family: var(--font-mono); font-size: 10.5px; fill: var(--mute
 svg .t-frame { font-family: var(--font-display); font-size: 13px; font-weight: 600; }
 svg .t-rg { font-family: var(--font-mono); font-size: 10.5px; fill: var(--muted); letter-spacing: 0.02em; }
 svg .t-arrow { font-size: 10.5px; font-weight: 500; }
+svg .t-off { fill: var(--muted); font-weight: 500; }
 svg .b-new { fill: var(--new-fill); stroke: var(--new); stroke-width: 1.5; }
 svg .b-exist { fill: var(--exist-fill); stroke: var(--exist); stroke-width: 1.5; stroke-dasharray: 5 3; }
 svg .b-ms { fill: var(--panel); stroke: var(--ms); stroke-width: 1.5; stroke-dasharray: 2 3; }
@@ -123,14 +124,8 @@ pre .c { color: var(--muted); }
   <header>
     <div class="eyebrow">cm-lab-avd · infra/main.bicep</div>
     <h1>AVD Build Map</h1>
-    <p>What the deployment builds for a pooled, Entra ID joined Azure Virtual Desktop environment with no Intune. Change the options to see which resources are created, which existing ones are reused, and where traffic flows.</p>
-    <div class="spec">
-      <span><b>1,000</b> concurrent users</span>
-      <span><b>10</b> sessions per host</span>
-      <span><b>100</b> session hosts</span>
-      <span><b>Standard_D8s_v5</b> · 800 vCPU</span>
-      <span>Zones <b>1/2/3</b> → 34 / 33 / 33</span>
-    </div>
+    <p>What the deployment builds for an Entra ID joined Azure Virtual Desktop environment with no Intune, pooled or personal. Change the options to see which resources are created, which existing ones are reused, and where traffic flows.</p>
+    <div class="spec" id="spec"></div>
   </header>
 
   <section class="controls" aria-label="Deployment options">
@@ -139,12 +134,13 @@ pre .c { color: var(--muted); }
       <button type="button" data-preset="landing">Existing landing zone</button>
       <button type="button" data-preset="hub">New spoke + hub firewall</button>
       <button type="button" data-preset="green">Greenfield</button>
+      <button type="button" data-preset="personal">Personal desktops + automation + Defender</button>
     </div>
     <div class="opts" id="opts"></div>
   </section>
 
   <figure>
-    <div class="scroll"><svg id="diagram" viewBox="0 0 1120 690" role="img" aria-label="Architecture diagram of the AVD deployment for the selected options"></svg></div>
+    <div class="scroll"><svg id="diagram" viewBox="0 0 1120 850" role="img" aria-label="Architecture diagram of the AVD deployment for the selected options"></svg></div>
     <div class="legend">
       <span><i class="sw new"></i>Created by the deployment</span>
       <span><i class="sw exist"></i>Existing, only referenced</span>
@@ -170,41 +166,53 @@ pre .c { color: var(--muted); }
 
   <figure>
     <div class="scroll">
-      <svg viewBox="0 0 1120 250" role="img" aria-label="Build order for each session host: VM with managed identity, then Entra join without Intune, then FSLogix and Kerberos configuration, then AVD agent registration">
+      <svg viewBox="0 0 1120 250" role="img" aria-label="Build order for each session host: VM, Entra join without Intune, guest attestation, host configuration (Kerberos, FSLogix), customisation, AVD agent registration, restart">
         <defs>
           <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
         </defs>
-        <text x="20" y="28" class="t-frame">Build order on each of the 100 session hosts</text>
-        <text x="20" y="46" class="t-sub">Each step waits for the previous one. The host joins the pool last, fully configured. Hosts deploy 20 at a time.</text>
-
-        <rect x="20" y="70" width="240" height="104" rx="6" class="b-new"/>
-        <text x="36" y="95" class="t-title">1 · VM + NIC</text>
-        <text x="36" y="115" class="t-sub">Windows 11 multi-session + M365</text>
-        <text x="36" y="132" class="t-sub">Trusted Launch, zone 1/2/3</text>
-        <text x="36" y="155" class="t-mono">identity: SystemAssigned</text>
-
-        <rect x="300" y="70" width="240" height="104" rx="6" class="b-new"/>
-        <text x="316" y="95" class="t-title">2 · AADLoginForWindows</text>
-        <text x="316" y="115" class="t-sub">Joins the device to Entra ID</text>
-        <text x="316" y="132" class="t-sub">No mdmId setting, so no Intune</text>
-        <text x="316" y="155" class="t-mono">settings: {}</text>
-
-        <rect x="580" y="70" width="240" height="104" rx="6" class="b-new"/>
-        <text x="596" y="95" class="t-title">3 · Run command</text>
-        <text x="596" y="115" class="t-sub">FSLogix → \\&lt;storage&gt;\profiles</text>
-        <text x="596" y="132" class="t-sub">Entra Kerberos ticket retrieval</text>
-        <text x="596" y="155" class="t-mono">Configure-SessionHost.ps1</text>
-
-        <rect x="860" y="70" width="240" height="104" rx="6" class="b-new"/>
-        <text x="876" y="95" class="t-title">4 · AVD agent (DSC)</text>
-        <text x="876" y="115" class="t-sub">Installs agent, registers the host</text>
-        <text x="876" y="132" class="t-sub">Only now can users land on it</text>
-        <text x="876" y="155" class="t-mono">aadJoin: true · mdmId: ''</text>
-
-        <line x1="262" y1="122" x2="296" y2="122" class="a" marker-end="url(#ah2)"/>
-        <line x1="542" y1="122" x2="576" y2="122" class="a" marker-end="url(#ah2)"/>
-        <line x1="822" y1="122" x2="856" y2="122" class="a" marker-end="url(#ah2)"/>
-
+        <text x="20" y="28" class="t-frame">Build order on each session host</text>
+        <text x="20" y="46" class="t-sub">Each host is its own deployment from the avd-sessionhost template spec, 20 at a time by default. Each step waits for the previous one; users can only land on the host from step 6.</text>
+        <rect x="20" y="70" width="144" height="104" rx="6" class="b-new"/>
+        <text x="32" y="95" class="t-title">1 · VM + NIC</text>
+        <text x="32" y="115" class="t-sub">Win 11 multi-session</text>
+        <text x="32" y="132" class="t-sub">Trusted Launch · zone</text>
+        <text x="32" y="155" class="t-mono">managed identity</text>
+        <line x1="165" y1="122" x2="175" y2="122" class="a" marker-end="url(#ah2)"/>
+        <rect x="176" y="70" width="144" height="104" rx="6" class="b-new"/>
+        <text x="188" y="95" class="t-title">2 · Entra join</text>
+        <text x="188" y="115" class="t-sub">AADLoginForWindows</text>
+        <text x="188" y="132" class="t-sub">no mdmId → no Intune</text>
+        <text x="188" y="155" class="t-mono">settings: {}</text>
+        <line x1="321" y1="122" x2="331" y2="122" class="a" marker-end="url(#ah2)"/>
+        <rect x="332" y="70" width="144" height="104" rx="6" class="b-new"/>
+        <text x="344" y="95" class="t-title">3 · Attestation</text>
+        <text x="344" y="115" class="t-sub">GuestAttestation</text>
+        <text x="344" y="132" class="t-sub">boot integrity</text>
+        <text x="344" y="155" class="t-mono">Trusted Launch only</text>
+        <line x1="477" y1="122" x2="487" y2="122" class="a" marker-end="url(#ah2)"/>
+        <rect x="488" y="70" width="144" height="104" rx="6" class="b-new"/>
+        <text x="500" y="95" class="t-title">4 · Host config</text>
+        <text x="500" y="115" class="t-sub">Kerberos · FSLogix</text>
+        <text x="500" y="132" class="t-sub">Configure-SessionHost</text>
+        <text x="500" y="155" class="t-mono">run command</text>
+        <line x1="633" y1="122" x2="643" y2="122" class="a" marker-end="url(#ah2)"/>
+        <rect x="644" y="70" width="144" height="104" rx="6" class="b-new"/>
+        <text x="656" y="95" class="t-title">5 · Customise</text>
+        <text x="656" y="115" class="t-sub">apps · DLP · Defender</text>
+        <text x="656" y="132" class="t-sub">Customize-SessionHost</text>
+        <text x="656" y="155" class="t-mono">customizations.json</text>
+        <line x1="789" y1="122" x2="799" y2="122" class="a" marker-end="url(#ah2)"/>
+        <rect x="800" y="70" width="144" height="104" rx="6" class="b-new"/>
+        <text x="812" y="95" class="t-title">6 · AVD agent</text>
+        <text x="812" y="115" class="t-sub">registers the host</text>
+        <text x="812" y="132" class="t-sub">users can land now</text>
+        <text x="812" y="155" class="t-mono">aadJoin: true</text>
+        <line x1="945" y1="122" x2="955" y2="122" class="a" marker-end="url(#ah2)"/>
+        <rect x="956" y="70" width="144" height="104" rx="6" class="b-new"/>
+        <text x="968" y="95" class="t-title">7 · Restart</text>
+        <text x="968" y="115" class="t-sub">settings take effect</text>
+        <text x="968" y="132" class="t-sub">host ready</text>
+        <text x="968" y="155" class="t-mono">Restart-AfterBuild</text>
         <text x="20" y="208" class="t-sub">Sign-in needs two role assignments, both made by the deployment: Desktop Virtualization User on the app group,</text>
         <text x="20" y="226" class="t-sub">and Virtual Machine User Login on the hosts resource group. Without the second, Entra-joined hosts refuse the logon.</text>
       </svg>
@@ -215,18 +223,24 @@ pre .c { color: var(--muted); }
 <script>
 (function () {
   var OPTIONS = [
+    { key: 'type', label: 'Desktop type', param: 'hostPoolType', choices: [['Pooled', 'Pooled'], ['Personal', 'Personal 1:1']] },
     { key: 'net', label: 'Session host network', param: 'networkMode', choices: [['existing', 'Existing VNet'], ['new', 'New VNet']] },
     { key: 'egress', label: 'Outbound internet (new VNet)', param: 'outboundMethod', choices: [['NatGateway', 'NAT gateway'], ['FirewallUdr', 'Hub firewall']] },
     { key: 'peer', label: 'Peer new VNet to hub', param: 'hubVnetId', choices: [['yes', 'Peer'], ['no', 'No peering']] },
     { key: 'la', label: 'Log Analytics', param: 'logAnalyticsMode', choices: [['existing', 'Existing'], ['new', 'New']] },
     { key: 'fsl', label: 'FSLogix profile storage', param: 'deployFslogixStorage', choices: [['yes', 'Deploy'], ['no', 'Skip']] },
+    { key: 'fslnet', label: 'Profile share access', param: 'fslogixNetworkAccess', choices: [['privateEndpoint', 'Private endpoint'], ['serviceEndpoint', 'Service endpoint']] },
     { key: 'dns', label: 'privatelink.file DNS zone', param: 'privateDnsZoneMode', choices: [['existing', 'Existing'], ['new', 'New'], ['policyManaged', 'Policy']] },
-    { key: 'scale', label: 'Autoscale plan', param: 'deployScalingPlan', choices: [['yes', 'Deploy'], ['no', 'Skip']] }
+    { key: 'scale', label: 'Autoscale plan', param: 'deployScalingPlan', choices: [['yes', 'Deploy'], ['no', 'Skip']] },
+    { key: 'auto', label: 'Pool automation (Personal)', param: 'deployPoolAutomation', choices: [['yes', 'Deploy'], ['no', 'Skip']] },
+    { key: 'def', label: 'Defender for Servers', param: 'defenderForServersPlan', choices: [['None', 'None'], ['P1', 'P1'], ['P2', 'P2']] }
   ];
+  var BASE = { type: 'Pooled', egress: 'NatGateway', peer: 'no', fslnet: 'privateEndpoint', scale: 'yes', auto: 'no', def: 'None' };
   var PRESETS = {
-    landing: { net: 'existing', egress: 'NatGateway', peer: 'no', la: 'existing', fsl: 'yes', dns: 'existing', scale: 'yes' },
-    hub: { net: 'new', egress: 'FirewallUdr', peer: 'yes', la: 'existing', fsl: 'yes', dns: 'policyManaged', scale: 'yes' },
-    green: { net: 'new', egress: 'NatGateway', peer: 'no', la: 'new', fsl: 'yes', dns: 'new', scale: 'yes' }
+    landing: Object.assign({}, BASE, { net: 'existing', la: 'existing', fsl: 'yes', dns: 'existing' }),
+    hub: Object.assign({}, BASE, { net: 'new', egress: 'FirewallUdr', peer: 'yes', la: 'existing', fsl: 'yes', dns: 'policyManaged' }),
+    green: Object.assign({}, BASE, { net: 'new', la: 'new', fsl: 'yes', dns: 'new' }),
+    personal: Object.assign({}, BASE, { type: 'Personal', net: 'existing', la: 'existing', fsl: 'no', fslnet: 'serviceEndpoint', dns: 'existing', auto: 'yes', def: 'P1' })
   };
   var S = Object.assign({}, PRESETS.landing);
   try { var saved = JSON.parse(localStorage.getItem('avd-build-map') || 'null'); if (saved) S = Object.assign(S, saved); } catch (e) {}
@@ -249,6 +263,24 @@ pre .c { color: var(--muted); }
     b.addEventListener('click', function () { S = Object.assign({}, PRESETS[b.dataset.preset]); update(); });
   });
 
+  // ---------- derived state
+  function D() {
+    var personal = S.type === 'Personal';
+    var newNet = S.net === 'new';
+    var fsl = S.fsl === 'yes';
+    var pe = fsl && S.fslnet === 'privateEndpoint';
+    var se = fsl && S.fslnet === 'serviceEndpoint';
+    var auto = personal && S.auto === 'yes';
+    return {
+      personal: personal, newNet: newNet, fsl: fsl, pe: pe, se: se, auto: auto,
+      fw: newNet && S.egress === 'FirewallUdr', peer: newNet && S.peer === 'yes',
+      dns: pe ? S.dns : 'none', laNew: S.la === 'new', def: S.def !== 'None',
+      hosts: personal ? 1000 : 100, spares: auto ? 5 : 0,
+      size: personal ? 'D4s_v5' : 'D8s_v5', vcpu: personal ? 4 : 8, prefix: personal ? 'avdpd' : 'avdsh'
+    };
+  }
+  function n(x) { return x.toLocaleString('en-GB'); }
+
   // ---------- svg helpers
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
   function tag(x, y, mode) {
@@ -259,7 +291,7 @@ pre .c { color: var(--muted); }
   function box(x, y, w, h, title, sub, mode, mono) {
     var cls = mode === 'new' ? 'b-new' : mode === 'exist' ? 'b-exist' : mode === 'ms' ? 'b-ms' : 'b-off';
     var s = '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="5" class="' + cls + '"/>';
-    s += '<text x="' + (x + 10) + '" y="' + (y + 19) + '" class="t-title">' + esc(title) + '</text>';
+    s += '<text x="' + (x + 10) + '" y="' + (y + 19) + '" class="t-title' + (mode === 'off' ? ' t-off' : '') + '">' + esc(title) + '</text>';
     if (sub) s += '<text x="' + (x + 10) + '" y="' + (y + 35) + '" class="t-sub">' + esc(sub) + '</text>';
     if (mono) s += '<text x="' + (x + 10) + '" y="' + (y + h - 9) + '" class="t-mono">' + esc(mono) + '</text>';
     if (mode === 'new') s += tag(x + w - 8, y - 7, 'new');
@@ -273,161 +305,186 @@ pre .c { color: var(--muted); }
     else s += '<text x="' + (x + 10) + '" y="' + (y + 16) + '" class="t-rg">' + esc(label) + (sub ? '  ·  ' + sub : '') + '</text>';
     return s;
   }
-  function arrow(pts, label, lx, ly, dashed, anchor) {
+  function label(text, lx, ly, anchor) {
+    var w = text.length * 5.7 + 10, a = anchor || 'middle';
+    var rx = a === 'middle' ? lx - w / 2 : a === 'start' ? lx - 5 : lx - w + 5;
+    return '<rect x="' + rx + '" y="' + (ly - 11) + '" width="' + w + '" height="15" rx="3" class="lbl-bg"/>' +
+      '<text x="' + lx + '" y="' + ly + '" text-anchor="' + a + '" class="t-arrow">' + esc(text) + '</text>';
+  }
+  function arrow(pts, text, lx, ly, dashed, anchor) {
     var s = '<polyline points="' + pts.map(function (p) { return p.join(','); }).join(' ') + '" class="a' + (dashed ? ' a-dash' : '') + '" marker-end="url(#ah)"/>';
-    if (label) {
-      var w = label.length * 5.7 + 10;
-      var a = anchor || 'middle';
-      var rx = a === 'middle' ? lx - w / 2 : a === 'start' ? lx - 5 : lx - w + 5;
-      s += '<rect x="' + rx + '" y="' + (ly - 11) + '" width="' + w + '" height="15" rx="3" class="lbl-bg"/>';
-      s += '<text x="' + lx + '" y="' + ly + '" text-anchor="' + a + '" class="t-arrow">' + esc(label) + '</text>';
-    }
-    return s;
+    return text ? s + label(text, lx, ly, anchor) : s;
   }
 
   // ---------- diagram
+  // Top band (y < 330): users, gateway, service RG, monitor RG, management sub - drawn as is.
+  // Lower band: hosts, storage, network, hub, Entra, Internet - drawn in a group moved down 90px,
+  // using its own coordinates. Arrows that cross the two bands use absolute coordinates.
   function draw() {
-    var newNet = S.net === 'new';
-    var fw = newNet && S.egress === 'FirewallUdr';
-    var peer = newNet && S.peer === 'yes';
-    var fsl = S.fsl === 'yes';
-    var dns = fsl ? S.dns : 'none';
-    var laNew = S.la === 'new';
-    var hubShown = fw || peer || dns === 'existing';
-    var g = [];
-    g.push('<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>');
+    var d = D();
+    var hubShown = d.fw || d.peer || d.dns === 'existing';
+    var top = [], low = [], bottom = [];
+    top.push('<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>');
 
     // External column
-    g.push(box(20, 40, 150, 58, 'AVD users', '1,000 concurrent', 'ms', 'Entra ID group'));
-    g.push(box(20, 160, 150, 70, 'AVD gateway', 'Microsoft-managed', 'ms', 'broker · reverse connect'));
-    g.push(box(20, 330, 150, 64, 'Microsoft Entra ID', 'device + user identity', 'ms'));
-    g.push(box(20, 628, 150, 46, 'Internet', 'updates, M365, AVD', 'ms'));
+    top.push(box(20, 40, 150, 58, 'AVD users', d.personal ? '1,000 · own desktop each' : '1,000 concurrent', 'ms', 'Entra ID group'));
+    top.push(box(20, 160, 150, 70, 'AVD gateway', 'Microsoft-managed', 'ms', 'reverse connect'));
+    low.push(box(20, 330, 150, 64, 'Microsoft Entra ID', 'device + user identity', 'ms'));
+    low.push(box(20, 628, 150, 46, 'Internet', 'updates, M365, AVD', 'ms'));
 
     // Workload subscription
-    g.push(frame(195, 12, 680, 664, 'Workload subscription (holds the VNet)', 'sub'));
+    top.push(frame(195, 12, 680, 826, 'Workload subscription (holds the VNet)', 'sub'));
 
-    // Service RG
-    g.push(frame(215, 42, 320, 196, 'rg-…-service', 'rg-new', 'host pool'));
-    g.push(box(230, 66, 140, 64, 'Workspace', 'feed for clients', 'new'));
-    g.push(box(382, 66, 140, 64, 'Desktop app group', 'users group assigned', 'new'));
-    g.push(box(230, 152, 140, 64, 'Host pool', 'Pooled · 10 / host', 'new', S.scale === 'yes' ? 'autoscaled' : 'BreadthFirst'));
-    g.push(box(382, 152, 140, 64, 'Scaling plan', S.scale === 'yes' ? 'powers hosts on/off' : 'not deployed', S.scale === 'yes' ? 'new' : 'off'));
+    // Service RG: three rows
+    top.push(frame(215, 42, 320, 286, 'rg-…-service', 'rg-new', 'host pool'));
+    top.push(box(230, 66, 140, 64, 'Workspace', 'feed for clients', 'new'));
+    top.push(box(382, 66, 140, 64, 'Desktop app group', 'users group assigned', 'new'));
+    top.push(box(230, 152, 140, 64, 'Template spec', 'avd-sessionhost 1.0', 'new', 'one deploy per host'));
+    if (d.auto) top.push(box(382, 152, 140, 64, 'Automation account', 'daily runbook 06:30', 'new', '5 spares · 90 days'));
+    else top.push(box(382, 152, 140, 64, 'Pool automation', d.personal ? 'not deployed' : 'Personal pools only', 'off'));
+    top.push(box(230, 238, 140, 64, 'Host pool', d.personal ? 'Personal · 1 per user' : 'Pooled · 10 / host', 'new', d.personal ? 'Start VM on Connect' : (S.scale === 'yes' ? 'autoscaled' : 'BreadthFirst')));
+    top.push(box(382, 238, 140, 64, 'Scaling plan', S.scale === 'yes' ? (d.personal ? 'start / deallocate idle' : 'powers hosts on/off') : 'not deployed', S.scale === 'yes' ? 'new' : 'off'));
 
     // Monitor RG / LA
-    if (laNew) {
-      g.push(frame(555, 42, 300, 196, 'rg-…-monitor', 'rg-new', 'Log Analytics'));
-      g.push(box(575, 108, 260, 64, 'Log Analytics workspace', 'diagnostics from AVD + Files', 'new', '30-day retention'));
+    if (d.laNew) {
+      top.push(frame(555, 42, 300, 196, 'rg-…-monitor', 'rg-new', 'Log Analytics'));
+      top.push(box(575, 108, 260, 64, 'Log Analytics workspace', 'diagnostics from AVD + Files', 'new', '30-day retention'));
+    }
+    // Management subscription (existing LA)
+    if (!d.laNew) {
+      top.push(frame(895, 12, 210, 196, 'Management sub', 'sub'));
+      top.push(box(910, 74, 180, 64, 'Log Analytics', 'central workspace', 'exist'));
     }
 
     // Hosts RG
-    g.push(frame(215, 258, 320, 206, 'rg-…-hosts', 'rg-new', 'VMs, NICs, disks'));
+    low.push(frame(215, 258, 320, 206, 'rg-…-hosts', 'rg-new', 'VMs, NICs, disks'));
     [[251, 322], [243, 314], [235, 306]].forEach(function (p, i) {
-      g.push('<rect x="' + p[0] + '" y="' + p[1] + '" width="270" height="120" rx="5" class="b-new"' + (i < 2 ? ' opacity="0.55"' : '') + '/>');
+      low.push('<rect x="' + p[0] + '" y="' + p[1] + '" width="270" height="120" rx="5" class="b-new"' + (i < 2 ? ' opacity="0.55"' : '') + '/>');
     });
-    g.push('<text x="247" y="327" class="t-title">100 session hosts</text>');
-    g.push('<text x="247" y="345" class="t-sub">avdsh-001 … avdsh-100 · D8s_v5</text>');
-    g.push('<text x="247" y="362" class="t-sub">Entra joined · not Intune enrolled</text>');
-    g.push('<text x="247" y="380" class="t-sub">FSLogix profile container</text>');
-    g.push('<text x="247" y="414" class="t-mono">zone 1: 34 · zone 2: 33 · zone 3: 33</text>');
-    g.push(tag(513, 299, 'new'));
+    var z = [Math.ceil(d.hosts / 3), Math.floor(d.hosts / 3), Math.floor(d.hosts / 3)];
+    if (d.hosts % 3 === 2) z[1]++;
+    low.push('<text x="247" y="327" class="t-title">' + n(d.hosts) + (d.personal ? ' personal desktops' : ' session hosts') + '</text>');
+    low.push('<text x="247" y="345" class="t-sub">' + d.prefix + '-001 … ' + d.prefix + '-' + (d.hosts < 1000 ? d.hosts : n(d.hosts).replace(',', '')) + ' · ' + d.size + '</text>');
+    low.push('<text x="247" y="362" class="t-sub">Entra joined · not Intune enrolled</text>');
+    low.push('<text x="247" y="380" class="t-sub">' + (d.fsl ? 'FSLogix profile container' : 'profile on the VM') + (d.def ? ' · Defender for Endpoint' : '') + '</text>');
+    low.push('<text x="247" y="397" class="t-sub">' + (d.spares ? '+ ' + d.spares + ' spare desktops kept ready' : 'one deployment each, 20 at a time') + '</text>');
+    low.push('<text x="247" y="414" class="t-mono">zone 1: ' + z[0] + ' · zone 2: ' + z[1] + ' · zone 3: ' + z[2] + '</text>');
+    low.push(tag(513, 299, 'new'));
 
     // Storage RG
-    if (fsl) {
-      g.push(frame(555, 258, 300, 206, 'rg-…-storage', 'rg-new', 'FSLogix'));
-      g.push(box(575, 282, 260, 62, 'Azure Files Premium', 'share "profiles" · Entra Kerberos', 'new', 'public access off'));
-      g.push(box(575, 372, 120, 62, 'Private endpoint', 'file', 'new'));
-      if (dns === 'new') g.push(box(715, 372, 120, 62, 'Private DNS zone', 'privatelink.file', 'new'));
-      if (dns === 'policyManaged') g.push(box(715, 372, 120, 62, 'DNS record', 'by Azure Policy', 'ms'));
+    if (d.fsl) {
+      low.push(frame(555, 258, 300, 206, 'rg-…-storage', 'rg-new', 'FSLogix'));
+      low.push(box(575, 282, 260, 62, 'Azure Files Premium', 'share "profiles" · Entra Kerberos', 'new', d.pe ? 'public access off' : 'firewall: host subnet only'));
+      if (d.pe) {
+        low.push(box(575, 372, 120, 62, 'Private endpoint', 'file', 'new'));
+        if (d.dns === 'new') low.push(box(715, 372, 120, 62, 'Private DNS zone', 'privatelink.file', 'new'));
+        if (d.dns === 'policyManaged') low.push(box(715, 372, 120, 62, 'DNS record', 'by Azure Policy', 'ms'));
+      } else {
+        low.push(box(575, 372, 260, 62, 'Public endpoint, firewalled', 'reached via service endpoint', 'ms', 'public DNS · no privatelink zone'));
+      }
     }
 
     // Network
-    if (newNet) {
-      g.push(frame(215, 484, 640, 176, 'rg-…-network', 'rg-new', 'new VNet'));
-      g.push('<rect x="235" y="508" width="270" height="138" rx="5" class="b-new"/>');
-      g.push('<text x="247" y="527" class="t-title">VNet 10.50.0.0/16</text>');
-      g.push(tag(497, 501, 'new'));
-      g.push(box(247, 540, 246, 44, 'snet-sessionhosts /22', '', 'new', 'NSG: no inbound from Internet'));
-      g.push(box(247, 592, 246, 44, 'snet-privateendpoints /27', '', 'new', 'NSG: 445 from hosts'));
-      if (fw) g.push(box(535, 540, 150, 62, 'Route table', '0.0.0.0/0 → firewall', 'new'));
-      else g.push(box(535, 540, 150, 62, 'NAT gateway', 'static public IP', 'new'));
+    var ips = d.hosts + d.spares;
+    if (d.newNet) {
+      low.push(frame(215, 484, 640, 176, 'rg-…-network', 'rg-new', 'new VNet'));
+      low.push('<rect x="235" y="508" width="270" height="138" rx="5" class="b-new"/>');
+      low.push('<text x="247" y="527" class="t-title">VNet 10.50.0.0/16</text>');
+      low.push(tag(497, 501, 'new'));
+      low.push(box(247, 540, 246, 44, 'snet-sessionhosts /22', '', 'new', d.se ? 'Microsoft.Storage service endpoint' : 'NSG: no inbound from Internet'));
+      low.push(box(247, 592, 246, 44, 'snet-privateendpoints /27', '', 'new', d.pe ? 'NSG: 445 from hosts' : 'unused without a private endpoint'));
+      if (d.fw) low.push(box(535, 540, 150, 62, 'Route table', '0.0.0.0/0 → firewall', 'new'));
+      else low.push(box(535, 540, 150, 62, 'NAT gateway', 'static public IP', 'new'));
     } else {
-      g.push(frame(215, 484, 640, 176, 'your network RG', 'rg-exist', 'existing VNet'));
-      g.push('<rect x="235" y="508" width="270" height="138" rx="5" class="b-exist"/>');
-      g.push('<text x="247" y="527" class="t-title">Existing VNet (same region)</text>');
-      g.push(tag(497, 501, 'exist'));
-      g.push(box(247, 540, 246, 44, 'Session host subnet', '', 'exist', '≥ 101 free IPs'));
-      g.push(box(247, 592, 246, 44, 'Private endpoint subnet', '', 'exist', 'or the same subnet'));
-      g.push(box(535, 540, 150, 62, 'Your egress', 'firewall / NAT / UDR', 'exist'));
-    }
-
-    // Management subscription (existing LA)
-    if (!laNew) {
-      g.push(frame(895, 12, 210, 196, 'Management sub', 'sub'));
-      g.push(box(910, 74, 180, 64, 'Log Analytics', 'central workspace', 'exist'));
+      low.push(frame(215, 484, 640, 176, 'your network RG', 'rg-exist', 'existing VNet'));
+      low.push('<rect x="235" y="508" width="270" height="138" rx="5" class="b-exist"/>');
+      low.push('<text x="247" y="527" class="t-title">Existing VNet (same region)</text>');
+      low.push(tag(497, 501, 'exist'));
+      low.push(box(247, 540, 246, 44, 'Session host subnet', '', 'exist', '≥ ' + n(ips) + ' free IPs' + (d.se ? ' · + Storage endpoint' : '')));
+      low.push(box(247, 592, 246, 44, 'Private endpoint subnet', '', d.pe ? 'exist' : 'off', d.pe ? 'or the same subnet' : 'not needed'));
+      low.push(box(535, 540, 150, 62, 'Your egress', 'firewall / NAT / UDR', 'exist'));
     }
 
     // Hub subscription
     if (hubShown) {
-      g.push(frame(895, 230, 210, 446, 'Hub / connectivity sub', 'sub'));
-      if (peer || fw) {
-        g.push(box(910, 262, 180, 56, 'Hub VNet', peer ? 'peered with spoke' : 'hub network', 'exist'));
-        g.push(box(910, 340, 180, 56, 'Azure Firewall / NVA', fw ? 'hosts egress → Internet' : 'hub egress', 'exist'));
+      low.push(frame(895, 230, 210, 446, 'Hub / connectivity sub', 'sub'));
+      if (d.peer || d.fw) {
+        low.push(box(910, 262, 180, 56, 'Hub VNet', d.peer ? 'peered with spoke' : 'hub network', 'exist'));
+        low.push(box(910, 340, 180, 56, 'Azure Firewall / NVA', d.fw ? 'hosts egress → Internet' : 'hub egress', 'exist'));
       }
-      if (dns === 'existing') g.push(box(910, 560, 180, 64, 'Private DNS zone', 'privatelink.file', 'exist', 'linked to the VNet'));
+      if (d.dns === 'existing') low.push(box(910, 560, 180, 64, 'Private DNS zone', 'privatelink.file', 'exist', 'linked to the VNet'));
     }
 
-    // ---------- arrows
-    g.push(arrow([[95, 98], [95, 156]], 'sign in · connect 443', 100, 132, false, 'start'));
-    g.push(arrow([[235, 350], [190, 350], [190, 214], [174, 214]], '', 0, 0));
-    g.push('<text x="184" y="262" text-anchor="end" class="t-arrow">reverse connect</text><text x="184" y="276" text-anchor="end" class="t-arrow">outbound 443</text>');
-    g.push(arrow([[235, 385], [174, 385]], '', 0, 0));
-    g.push('<text x="204" y="402" text-anchor="middle" class="t-arrow">Entra join</text>');
-    g.push(arrow([[300, 306], [300, 220]], 'agent registers', 300, 252));
-    if (fsl) {
-      g.push(arrow([[521, 403], [571, 403]], '', 0, 0));
-      g.push('<text x="546" y="396" text-anchor="middle" class="t-arrow">SMB 445</text>');
-      g.push(arrow([[635, 372], [635, 348]], '', 0, 0));
-      if (dns === 'new') g.push(arrow([[697, 403], [711, 403]], '', 0, 0));
-      if (dns === 'existing') g.push(arrow([[655, 434], [655, 474], [880, 474], [880, 592], [906, 592]], 'A record', 790, 478));
+    // Defender (subscription level)
+    if (d.def) {
+      bottom.push(box(215, 774, 640, 60, 'Microsoft Defender for Servers ' + S.def + ' · whole subscription', 'Defender for Cloud deploys Defender for Endpoint (MDE.Windows) to every VM, AVD or not', 'new', 'pricings/VirtualMachines · settings/WDATP'));
+      bottom.push(box(20, 774, 150, 60, 'Defender portal', 'alerts · device timeline', 'ms'));
+      bottom.push(arrow([[215, 804], [174, 804]], '', 0, 0));
+    } else {
+      bottom.push(box(215, 774, 640, 60, 'Defender for Servers: subscription left as it is', 'defenderForServersPlan = None. Defender Antivirus is still enforced on every host by customizations.json.', 'off'));
     }
-    // diagnostics
-    if (laNew) g.push(arrow([[535, 140], [571, 140]], 'diag', 553, 135));
-    else g.push(arrow([[522, 56], [880, 56], [880, 106], [906, 106]], 'diagnostics', 700, 52));
-    // egress
-    if (newNet && !fw) g.push(arrow([[610, 602], [610, 653], [174, 653]], 'outbound internet', 560, 657));
-    if (!newNet) g.push(arrow([[610, 602], [610, 653], [174, 653]], 'outbound via your route', 560, 657, true));
-    if (newNet) g.push(arrow([[493, 562], [531, 562]], '', 0, 0));
-    if (fw) {
-      g.push(arrow([[685, 571], [868, 571], [868, 368], [906, 368]], '0.0.0.0/0', 820, 566));
+
+    // ---------- arrows within the top band
+    top.push(arrow([[95, 98], [95, 156]], 'sign in · connect 443', 100, 132, false, 'start'));
+    if (d.laNew) top.push(arrow([[535, 140], [571, 140]], 'diag', 553, 135));
+    else top.push(arrow([[522, 56], [880, 56], [880, 106], [906, 106]], 'diagnostics', 700, 52));
+
+    // ---------- arrows within the lower band (group coordinates)
+    low.push(arrow([[235, 385], [174, 385]], '', 0, 0));
+    low.push('<text x="204" y="402" text-anchor="middle" class="t-arrow">Entra join</text>');
+    if (d.fsl) {
+      low.push(arrow([[521, 403], [571, 403]], '', 0, 0));
+      low.push('<text x="546" y="396" text-anchor="middle" class="t-arrow">SMB 445</text>');
+      low.push(arrow([[635, 372], [635, 348]], '', 0, 0));
+      if (d.dns === 'new') low.push(arrow([[697, 403], [711, 403]], '', 0, 0));
+      if (d.dns === 'existing') low.push(arrow([[655, 434], [655, 474], [880, 474], [880, 592], [906, 592]], 'A record', 790, 478));
     }
-    if (peer) {
-      g.push('<polyline points="505,520 860,520 860,290 906,290" class="a a-dash" marker-start="url(#ah)" marker-end="url(#ah)"/>');
-      g.push('<rect x="735" y="508" width="62" height="15" rx="3" class="lbl-bg"/><text x="766" y="519" text-anchor="middle" class="t-arrow">peering</text>');
+    if (d.newNet && !d.fw) low.push(arrow([[610, 602], [610, 653], [174, 653]], 'outbound internet', 560, 657));
+    if (!d.newNet) low.push(arrow([[610, 602], [610, 653], [174, 653]], 'outbound via your route', 560, 657, true));
+    if (d.newNet) low.push(arrow([[493, 562], [531, 562]], '', 0, 0));
+    if (d.fw) low.push(arrow([[685, 571], [868, 571], [868, 368], [906, 368]], '0.0.0.0/0', 820, 566));
+    if (d.peer) {
+      low.push('<polyline points="505,520 860,520 860,290 906,290" class="a a-dash" marker-start="url(#ah)" marker-end="url(#ah)"/>');
+      low.push('<rect x="735" y="508" width="62" height="15" rx="3" class="lbl-bg"/><text x="766" y="519" text-anchor="middle" class="t-arrow">peering</text>');
     }
-    document.getElementById('diagram').innerHTML = g.join('');
+
+    // ---------- arrows crossing the bands (absolute coordinates; lower band = +90)
+    var cross = [];
+    cross.push(arrow([[235, 440], [190, 440], [190, 214], [174, 214]], '', 0, 0));
+    cross.push('<text x="184" y="262" text-anchor="end" class="t-arrow">reverse connect</text><text x="184" y="276" text-anchor="end" class="t-arrow">outbound 443</text>');
+    cross.push(arrow([[300, 396], [300, 306]], 'agent registers', 300, 341));
+    if (d.auto) cross.push(arrow([[522, 184], [529, 184], [529, 440], [525, 440]], 'daily: add spares · delete unused', 470, 341, true));
+
+    document.getElementById('diagram').innerHTML = top.join('') + '<g transform="translate(0,90)">' + low.join('') + '</g>' + cross.join('') + bottom.join('');
   }
 
-  // ---------- table + params + caption
+  // ---------- table + params + caption + header
   function rows() {
-    var newNet = S.net === 'new', fsl = S.fsl === 'yes', fw = newNet && S.egress === 'FirewallUdr', peer = newNet && S.peer === 'yes';
+    var d = D();
     var r = [
-      ['Resource groups', 'workload sub', 'new', 'service, hosts' + (fsl ? ', storage' : '') + (newNet ? ', network' : '') + (S.la === 'new' ? ', monitor' : '')],
-      ['Host pool (Pooled, max 10 sessions)', 'service RG', 'new'],
+      ['Resource groups', 'workload sub', 'new', 'service, hosts' + (d.fsl ? ', storage' : '') + (d.newNet ? ', network' : '') + (d.laNew ? ', monitor' : '')],
+      [d.personal ? 'Host pool (Personal, Automatic assignment)' : 'Host pool (Pooled, max 10 sessions)', 'service RG', 'new', d.personal ? 'named …-personal; Start VM on Connect' : ''],
       ['Desktop app group + workspace', 'service RG', 'new'],
-      ['Scaling plan', 'service RG', S.scale === 'yes' ? 'new' : null],
-      ['100 × VM, NIC, OS disk', 'hosts RG', 'new'],
+      ['Scaling plan' + (d.personal ? ' (personal schedule)' : ''), 'service RG', S.scale === 'yes' ? 'new' : null],
+      ['Template spec avd-sessionhost 1.0', 'service RG', 'new', 'published by Deploy-Avd.ps1; one small deployment per host'],
+      ['Automation account + managed identity', 'service RG', d.auto ? 'new' : null, 'runbook, settings and daily schedule published by Publish-AvdPoolAutomation.ps1'],
+      ['Automation roles: Contributor (hosts RG), Host Pool Contributor + Reader (service RG), Network Contributor (VNet), Log Analytics Reader', 'several', d.auto ? 'new' : null],
+      [n(d.hosts) + (d.spares ? ' + ' + d.spares + ' spare' : '') + ' × VM, NIC, OS disk (' + d.size + ')', 'hosts RG', 'new', n((d.hosts + d.spares) * d.vcpu) + ' vCPU of quota'],
       ['Role: Virtual Machine User Login', 'hosts RG', 'new'],
       ['Role: Desktop Virtualization User', 'app group', 'new'],
       ['Role: Power On Off Contributor (AVD SP)', 'hosts + service RG', 'new'],
-      ['Premium Files account + share', 'storage RG', fsl ? 'new' : null],
-      ['Private endpoint (file)', 'storage RG', fsl ? 'new' : null],
-      ['Private DNS zone + VNet link', fsl && S.dns === 'new' ? 'storage RG' : 'hub sub', fsl && S.dns === 'new' ? 'new' : fsl && S.dns === 'existing' ? 'exist' : null],
-      ['VNet, 2 subnets, 2 NSGs', newNet ? 'network RG' : 'your network RG', newNet ? 'new' : 'exist'],
-      ['NAT gateway + public IP', 'network RG', newNet && !fw ? 'new' : null],
-      ['Route table 0.0.0.0/0 → firewall', 'network RG', fw ? 'new' : null],
-      ['Peering spoke → hub and hub → spoke', 'both VNets', peer ? 'new' : null],
-      ['Hub firewall', 'hub sub', fw ? 'exist' : null],
-      ['Log Analytics workspace', S.la === 'new' ? 'monitor RG' : 'management sub', S.la === 'new' ? 'new' : 'exist']
+      ['Premium Files account + share', 'storage RG', d.fsl ? 'new' : null],
+      ['Private endpoint (file)', 'storage RG', d.pe ? 'new' : null],
+      ['Private DNS zone + VNet link', d.dns === 'new' ? 'storage RG' : 'hub sub', d.dns === 'new' ? 'new' : d.dns === 'existing' ? 'exist' : null],
+      ['Storage firewall: host subnet only', 'storage account', d.se ? 'new' : null],
+      ['Microsoft.Storage service endpoint on the host subnet', d.newNet ? 'network RG' : 'your subnet', d.se ? (d.newNet ? 'new' : 'exist') : null, d.newNet ? '' : 'add it yourself; Deploy-Avd.ps1 checks'],
+      ['VNet, 2 subnets, 2 NSGs', d.newNet ? 'network RG' : 'your network RG', d.newNet ? 'new' : 'exist'],
+      ['NAT gateway + public IP', 'network RG', d.newNet && !d.fw ? 'new' : null],
+      ['Route table 0.0.0.0/0 → firewall', 'network RG', d.fw ? 'new' : null],
+      ['Peering spoke → hub and hub → spoke', 'both VNets', d.peer ? 'new' : null],
+      ['Hub firewall', 'hub sub', d.fw ? 'exist' : null],
+      ['Log Analytics workspace', d.laNew ? 'monitor RG' : 'management sub', d.laNew ? 'new' : 'exist'],
+      ['Defender for Servers ' + S.def + ' + Defender for Endpoint integration', 'subscription', d.def ? 'new' : null, 'covers every VM in the subscription']
     ];
     document.getElementById('rows').innerHTML = r.filter(function (x) { return x[2]; }).map(function (x) {
       var pill = x[2] === 'new' ? '<span class="pill new">create</span>' : '<span class="pill exist">use existing</span>';
@@ -435,39 +492,70 @@ pre .c { color: var(--muted); }
     }).join('');
   }
   function params() {
-    var newNet = S.net === 'new', fsl = S.fsl === 'yes';
+    var d = D();
     var L = []; // [code, comment]
     function q(v) { return "'" + v + "'"; }
+    L.push(['param hostPoolType = ' + q(S.type)]);
+    if (d.personal) {
+      L.push(['param personalAssignmentType = ' + q('Automatic')]);
+      L.push(['param sessionHostNamePrefix = ' + q('avdpd')]);
+      L.push(['param vmSize = ' + q('Standard_D4s_v5')]);
+    }
     L.push(['param networkMode = ' + q(S.net)]);
-    if (newNet) {
+    if (d.newNet) {
       L.push(['param outboundMethod = ' + q(S.egress)]);
-      if (S.egress === 'FirewallUdr') L.push(['param firewallPrivateIp = ' + q('10.0.1.4')]);
-      L.push(['param hubVnetId = ' + q(S.peer === 'yes' ? '/subscriptions/<hub>/…/vnet-hub' : '')]);
+      if (d.fw) L.push(['param firewallPrivateIp = ' + q('10.0.1.4')]);
+      L.push(['param hubVnetId = ' + q(d.peer ? '/subscriptions/<hub>/…/vnet-hub' : '')]);
     } else {
       L.push(['param existingSessionHostSubnetId = ' + q('/subscriptions/<workload>/…/subnets/snet-avd')]);
     }
     L.push(['param logAnalyticsMode = ' + q(S.la)]);
-    if (S.la === 'existing') L.push(['param existingLogAnalyticsWorkspaceId = ' + q('/subscriptions/<mgmt>/…/log-central')]);
-    L.push(['param deployFslogixStorage = ' + fsl]);
-    if (fsl) {
-      L.push(['param privateDnsZoneMode = ' + q(S.dns)]);
-      if (S.dns === 'existing') L.push(['param existingFilePrivateDnsZoneId = ' + q('/subscriptions/<hub>/…/privatelink.file.core.windows.net')]);
+    if (!d.laNew) L.push(['param existingLogAnalyticsWorkspaceId = ' + q('/subscriptions/<mgmt>/…/log-central')]);
+    L.push(['param deployFslogixStorage = ' + d.fsl]);
+    if (d.fsl) {
+      L.push(['param fslogixNetworkAccess = ' + q(S.fslnet)]);
+      if (d.pe) L.push(['param privateDnsZoneMode = ' + q(S.dns)]);
+      if (d.dns === 'existing') L.push(['param existingFilePrivateDnsZoneId = ' + q('/subscriptions/<hub>/…/privatelink.file.core.windows.net')]);
     }
     L.push(['param deployScalingPlan = ' + (S.scale === 'yes')]);
+    if (d.personal) {
+      L.push(['param deployPoolAutomation = ' + d.auto]);
+      if (d.auto) {
+        L.push(['param spareDesktops = 5']);
+        L.push(['param deleteUnusedAfterDays = 90']);
+        L.push(['param poolAutomationMode = ' + q('Report'), "  // 'Apply' once happy"]);
+      }
+    }
+    L.push(['param defenderForServersPlan = ' + q(S.def), d.def ? '  // whole subscription' : '']);
     L.push(['']);
     L.push(['', '// the same for every option']);
-    L.push(['param targetUserCount = 1000']);
-    L.push(['param maxSessionsPerHost = 10', '  // → 100 hosts']);
+    if (d.personal) L.push(['param targetUserCount = 1000', '  // → 1,000 desktops']);
+    else {
+      L.push(['param targetUserCount = 1000']);
+      L.push(['param maxSessionsPerHost = 10', '  // → 100 hosts']);
+    }
     document.getElementById('params').innerHTML = L.map(function (l) {
       return esc(l[0]) + (l[1] ? '<span class="c">' + esc(l[1]) + '</span>' : '');
     }).join('\n');
   }
+  function header() {
+    var d = D();
+    var z = Math.ceil(d.hosts / 3) + ' / ' + Math.floor(d.hosts / 3) + ' / ' + Math.floor(d.hosts / 3);
+    var s = d.personal
+      ? ['<b>1,000</b> users', '<b>1</b> desktop each', '<b>1,000</b> personal desktops' + (d.spares ? ' + <b>' + d.spares + '</b> spare' : ''), '<b>Standard_D4s_v5</b> · ' + n((d.hosts + d.spares) * 4) + ' vCPU', 'Zones <b>1/2/3</b> → ' + z]
+      : ['<b>1,000</b> concurrent users', '<b>10</b> sessions per host', '<b>100</b> session hosts', '<b>Standard_D8s_v5</b> · 800 vCPU', 'Zones <b>1/2/3</b> → ' + z];
+    document.getElementById('spec').innerHTML = s.map(function (x) { return '<span>' + x + '</span>'; }).join('');
+  }
   function caption() {
-    var parts = [];
-    parts.push(S.net === 'new' ? 'A new VNet is created' + (S.egress === 'FirewallUdr' ? ' and routes all outbound traffic to the hub firewall' : ' with a NAT gateway for outbound traffic') + (S.peer === 'yes' ? ', peered to the hub.' : '.')
+    var d = D(), parts = [];
+    parts.push(d.newNet ? 'A new VNet is created' + (d.fw ? ' and routes all outbound traffic to the hub firewall' : ' with a NAT gateway for outbound traffic') + (d.peer ? ', peered to the hub.' : '.')
       : 'Session hosts join an existing VNet, which must be in the workload subscription and region and already provide outbound access.');
     parts.push('Users never reach the hosts directly: hosts open an outbound 443 connection to the AVD gateway, so no inbound ports are needed.');
-    if (S.fsl === 'yes') parts.push('Profiles mount over SMB 445 through a private endpoint, authenticated with Entra Kerberos.');
+    if (d.personal) parts.push('Each user gets their own desktop; Start VM on Connect powers it on and the scaling plan deallocates it when idle.');
+    if (d.pe) parts.push('Profiles mount over SMB 445 through a private endpoint, authenticated with Entra Kerberos.');
+    if (d.se) parts.push('Profiles mount over SMB 445 through the Microsoft.Storage service endpoint; the storage firewall only allows the host subnet, and no private DNS is needed.');
+    if (d.auto) parts.push('Every day the Automation account keeps 5 spare desktops ready, deploying them from the same template spec, and deletes desktops unused for 90 days.');
+    if (d.def) parts.push('Defender for Servers ' + S.def + ' applies to every VM in the subscription and deploys Defender for Endpoint to each one.');
     document.getElementById('caption').textContent = parts.join(' ');
     document.getElementById('diagram').setAttribute('aria-label', 'Architecture diagram. ' + parts.join(' '));
   }
@@ -479,8 +567,10 @@ pre .c { color: var(--muted); }
     });
     document.getElementById('fs-egress').disabled = S.net !== 'new';
     document.getElementById('fs-peer').disabled = S.net !== 'new';
-    document.getElementById('fs-dns').disabled = S.fsl !== 'yes';
-    draw(); rows(); params(); caption();
+    document.getElementById('fs-fslnet').disabled = S.fsl !== 'yes';
+    document.getElementById('fs-dns').disabled = S.fsl !== 'yes' || S.fslnet !== 'privateEndpoint';
+    document.getElementById('fs-auto').disabled = S.type !== 'Personal';
+    header(); draw(); rows(); params(); caption();
     try { localStorage.setItem('avd-build-map', JSON.stringify(S)); } catch (e) {}
   }
   update();

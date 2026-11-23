@@ -86,7 +86,14 @@ All scripts run in Windows PowerShell 5.1 and PowerShell 7, and use the Azure CL
 
 ## Architecture
 
-`docs/avd-build-map.html` is an interactive diagram. Open it in a browser and toggle new or existing VNet, egress, hub peering, Log Analytics, DNS, FSLogix and autoscale. It shows what gets created, what is only referenced, and where traffic flows. It shows the shared infrastructure; host pool type, pool automation and Defender aren't drawn.
+`docs/avd-build-map.html` is an interactive diagram. Open it in a browser and toggle:
+- pooled or personal desktops;
+- new or existing VNet, egress and hub peering;
+- Log Analytics;
+- FSLogix, private or service endpoint, and DNS;
+- autoscale, pool automation and the Defender for Servers plan.
+
+It shows what gets created, what is only referenced and where traffic flows, with the matching resource list and parameter file lines. Below it is the build order for each session host.
 
 Resource group names are configurable. Each one can be **created** or **existing**, and several components can share a group. The defaults are:
 
