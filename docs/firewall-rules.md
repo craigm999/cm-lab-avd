@@ -82,7 +82,8 @@ These are handled by the Azure host and aren't affected by the template's `0.0.0
 | `*.prod.do.dsp.mp.microsoft.com` | TCP 443 | Windows Update delivery |
 | `*.sfx.ms` | TCP 443 | OneDrive client updates |
 | `*.digicert.com` | TCP 80 | Certificate revocation |
-| Windows Update, Microsoft Defender, Microsoft 365 Apps / Teams / OneDrive | various | Use Microsoft's published Microsoft 365 endpoint list and the `WindowsUpdate` FQDN tag. The image includes Microsoft 365 Apps. |
+| Windows Update, Microsoft Defender Antivirus updates, Microsoft 365 Apps / Teams / OneDrive | various | Use Microsoft's published Microsoft 365 endpoint list and the `WindowsUpdate` FQDN tag. The default image includes Microsoft 365 Apps (unless you use the plain Windows image or remove them with `m365Apps`). |
+| Microsoft Defender for Endpoint (only with `defenderForServersPlan` P1/P2) | TCP 443 | Use Microsoft's *Defender for Endpoint* URL list for your region (or the `MicrosoftDefenderForEndpoint` service tag). Without it, devices don't onboard or report. |
 | Trusted Launch guest attestation | TCP 443 | The `GuestAttestation` extension reports boot integrity to Microsoft Azure Attestation. The Microsoft pages I checked don't list its endpoints. Allowing the `AzureAttestation` service tag is the usual approach. If it's blocked, sign-in still works but Defender for Cloud raises boot-integrity alerts. |
 
 ### Build-time app downloads (`customizations.json`)

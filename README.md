@@ -1,59 +1,102 @@
 # cm-lab-avd
 
-Bicep deployment for an **Azure Virtual Desktop** environment with:
+Bicep and PowerShell to deploy and run an **Azure Virtual Desktop** environment from Windows.
 
-- **Microsoft Entra ID joined** session hosts, **no Intune enrollment**
-- A **pooled** host pool, **10 users per host**
-- Capacity for **1,000 concurrent users**, so **100 session hosts**
-- FSLogix profile containers on Azure Files Premium using **Microsoft Entra Kerberos**, so no domain controllers are needed
-- Autoscale scaling plan, so 100 hosts don't run around the clock
-- Private networking: no inbound ports, and a private endpoint for storage
-- Works with **new or existing** resource groups, VNet, Log Analytics workspace and private DNS zone, so it can go into an existing landing zone
+- **Entra ID joined, no Intune.** Session hosts join Microsoft Entra ID without Intune enrollment. Settings Intune would normally push are applied by run commands during each host's build.
+- **Pooled or personal.**
+  - **Pooled:** shared multi-session hosts, 10 users each by default.
+  - **Personal:** one desktop per user, assigned automatically or by you.
+  - Sized from a user count: 1,000 users means 100 pooled hosts or 1,000 personal desktops.
+- **Any number of hosts in one run.** Each host is its own small deployment from a template spec, so there's no batch limit.
+- **Build-time customisation** from one file, [`customizations.json`](infra/customizations/customizations.json):
+  - optimisation and security hardening;
+  - device redirection;
+  - data protection against other tenants and personal accounts;
+  - removal of Teams, OneDrive and Office;
+  - Defender Antivirus policy;
+  - your own apps.
+- **FSLogix profiles** on Azure Files with Entra Kerberos, so no domain controllers. Hosts reach the share through a private endpoint or a service endpoint. On by default for pooled, optional for personal.
+- **Autoscale with Start VM on Connect.** Personal pools can also run a **daily job** that keeps spare desktops ready and deletes desktops unused for 90 days.
+- **Microsoft Defender for Cloud** (optional): Defender for Servers, which brings Defender for Endpoint.
+- **Fits an existing landing zone.** Resource groups, VNet, Log Analytics and private DNS can each be new or existing. No inbound ports.
 
-## Architecture diagram
+**Contents:** [Quick start](#quick-start-windows) · [Scripts](#scripts-at-a-glance) · [Architecture](#architecture) · [Deploy](#deploy) · [Personal desktops](#personal-11-desktops) · [Customising hosts](#customising-session-hosts) · [Device redirection](#device-redirection-drives-printers-usb-) · [Data protection](#data-protection-other-tenants-and-personal-accounts) · [Microsoft 365 apps](#microsoft-365-apps-teams-onedrive-office) · [Defender](#microsoft-defender) · [Custom images](#custom-images) · [Pool automation](#pool-automation-spare-desktops-and-tidy-up-personal) · [Updating](#updating-an-existing-deployment) · [Failures](#if-a-deployment-fails) · [Post-deployment steps](#post-deployment-steps) · [Connecting](#connecting) · [Testing](#testing) · [Settings reference](#settings-you-might-want-to-change)
 
-`docs/avd-build-map.html` is an interactive diagram. Open it in a browser and toggle new or existing VNet, egress, hub peering, Log Analytics, DNS, FSLogix and autoscale to see what gets created, what is only referenced, and where traffic flows.
+## Quick start (Windows)
 
-## Testing
+1. Install the Azure CLI, then open a new terminal:
+   ```powershell
+   winget install -e --id Microsoft.AzureCLI
+   ```
+2. Sign in:
+   ```powershell
+   az login
+   ```
+3. **Answer the questionnaire.** This writes `infra/params/<env>.bicepparam`. See *The questionnaire* below.
+   ```powershell
+   .\scripts\New-AvdParameterFile.ps1
+   ```
+4. **Preview**, then **deploy:**
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
+   ```
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam
+   ```
+5. **Do the post-deployment steps.** Entra SSO is needed for everyone; the storage steps only apply if FSLogix is on. See [Post-deployment steps](#post-deployment-steps).
+6. **Check a user can connect:**
+   ```powershell
+   .\scripts\Test-AvdUserAccess.ps1 -ParameterFile .\infra\params\prod.bicepparam -User alice@contoso.com
+   ```
 
-`.github/workflows/validate.yml` runs on every push:
+### The questionnaire
 
-- **Bicep** (`tests/test-template.sh`):
-  - compiles and lints `main.bicep`
-  - builds every scenario parameter file in `tests/params/` (greenfield, hub-spoke with a shared resource group, minimal)
-  - checks the compiled ARM JSON for the design requirements: Entra join with no Intune `mdmId`, the agent registering with `aadJoin: true`, a pooled host pool, and the host count formula
-- **PowerShell** (`tests/Test-PowerShell.ps1`):
-  - parses every script and runs PSScriptAnalyzer
-  - runs the questionnaire end to end with scripted answers for two scenarios
-  - runs `Deploy-Avd.ps1` against a stubbed Azure CLI to check the commands it issues and its password handling
-  - compiles the generated parameter files and checks their values
+Collect the environment details first, in one of two ways:
 
-The workflow can't run a real deployment: there are no Azure credentials in CI. Run `Deploy-Avd.ps1 -WhatIf` (or `deploy.sh ... what-if`) against your subscription for that.
+- **Interactive:** run `.\scripts\New-AvdParameterFile.ps1`. It asks each question and writes `infra/params/<env>.bicepparam` plus `<env>.answers.json`. If you're signed in with `az`, it also:
+  - offers subscriptions, VNets, subnets, workspaces and DNS zones as pick lists;
+  - detects resource groups that already exist;
+  - checks free subnet IPs and vCPU quota;
+  - resolves Entra group names to object IDs.
 
-## Start here: the questionnaire
-
-Collect the environment details first. You can do this in one of two ways:
-
-- **Interactive:** run `pwsh ./scripts/New-AvdParameterFile.ps1`. It asks each question and writes `infra/params/<env>.bicepparam` plus `<env>.answers.json`. If you're signed in with `az`, it also:
-  - offers subscriptions, VNets, subnets, workspaces and DNS zones as pick lists
-  - detects resource groups that already exist
-  - checks subnet free IPs and vCPU quota
-  - resolves Entra group names to object IDs
+  It covers pooled or personal, the image (with or without Microsoft 365 Apps), FSLogix, networking, monitoring, SSO, autoscale and the Defender for Servers plan.
 - **On paper:** fill in [`docs/questionnaire.md`](docs/questionnaire.md), for example by sending it to the customer, then run the script with the answers.
 
-Re-run the script with `-AnswersFile infra/params/<env>.answers.json` to change answers. Your previous answers become the defaults.
+Re-run the script with `-AnswersFile infra/params/<env>.answers.json` to change answers. Your previous answers become the defaults. A few settings aren't asked, such as pool automation, OS disk type and size, and everything in `customizations.json`. Set those in the files directly.
+
+## Scripts at a glance
+
+All scripts run in Windows PowerShell 5.1 and PowerShell 7, and use the Azure CLI. If script execution is blocked, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or `Unblock-File` the downloaded scripts. Read-only scripts make no changes.
+
+| Script | Use it to | Changes things? |
+|---|---|---|
+| `New-AvdParameterFile.ps1` | Answer the questionnaire and write the parameter file | Local files only |
+| `Deploy-Avd.ps1` | Deploy or update everything: `-WhatIf`, `-AddHosts`, `-HostNames`, `-InfraOnly`, `-ThrottleLimit` | Yes |
+| `Update-SessionHostConfig.ps1` | Re-apply settings to **existing** hosts: FSLogix and Kerberos, or `customizations.json` with `-Customize` | Yes |
+| `Update-SessionHostDisk.ps1` | Change the OS disk type or size of existing hosts | Yes |
+| `Set-AvdPersonalAssignment.ps1` | Assign personal desktops to users, from a group or a CSV | Yes |
+| `Add-CustomizationApp.ps1` | Add an app to `customizations.json` with its SHA-256 | Local file only |
+| `Publish-AvdPoolAutomation.ps1` | Publish the spare-desktop and tidy-up runbook. `Deploy-Avd.ps1` runs it for you. | Yes |
+| `Set-FslogixStorageAuth.ps1` | One-off Entra app setup for FSLogix storage: privatelink names, consent, Conditional Access check | Yes |
+| `Enable-EntraSSO.ps1` | One-off tenant setup for Entra SSO, including the session host device group | Yes |
+| `Test-AvdUserAccess.ps1` | Find out why a user can't see or open the desktop | Read-only |
+| `Get-FslogixHostDiagnostics.ps1` | Find out why profiles won't load on a host | Read-only |
+| `Get-HostDataProtectionReport.ps1` | Show which data-protection, Defender and Microsoft 365 app settings are really in effect on a host | Read-only |
+| `deploy.sh` | Deploy from macOS or Linux (simpler; see *How hosts are deployed*) | Yes |
 
 ## Architecture
+
+`docs/avd-build-map.html` is an interactive diagram. Open it in a browser and toggle new or existing VNet, egress, hub peering, Log Analytics, DNS, FSLogix and autoscale. It shows what gets created, what is only referenced, and where traffic flows. It shows the shared infrastructure; host pool type, pool automation and Defender aren't drawn.
 
 Resource group names are configurable. Each one can be **created** or **existing**, and several components can share a group. The defaults are:
 
 | Resource group | Contents |
 |---|---|
-| `rg-avd-prod-<region>-service` | Host pool (Pooled, `maxSessionLimit` 10), Desktop app group, Workspace, Scaling plan |
-| `rg-avd-prod-<region>-hosts` | 100 × Windows 11 multi-session + M365 VMs (Trusted Launch, spread over zones 1/2/3) |
-| `rg-avd-prod-<region>-network` | **New-VNet mode only:** VNet `10.50.0.0/16`, hosts subnet `/22`, PE subnet `/27`, NSGs, and either a NAT gateway or a UDR to the hub firewall. Optional hub peering in both directions. |
-| `rg-avd-prod-<region>-storage` | Premium FileStorage account (Entra Kerberos), `profiles` share, private endpoint. The DNS zone is new, existing (central) or policy-managed. |
-| `rg-avd-prod-<region>-monitor` | **New-workspace mode only:** Log Analytics. Otherwise diagnostics go to your existing workspace, which can be in any subscription. |
+| `rg-avd-<env>-<region>-service` | Host pool (Pooled, or `…-personal`), desktop app group, workspace, scaling plan. Also the `avd-sessionhost` template spec, and the Automation account when pool automation is on. |
+| `rg-avd-<env>-<region>-hosts` | Session host VMs: Windows 11 multi-session, Trusted Launch, spread over zones 1/2/3. Plus the per-host deployments. |
+| `rg-avd-<env>-<region>-network` | **New-VNet mode only.** VNet `10.50.0.0/16`, hosts subnet `/22`, private endpoint subnet `/27` and NSGs. Outbound is through a NAT gateway or a UDR to the hub firewall. Optional hub peering in both directions. |
+| `rg-avd-<env>-<region>-storage` | **FSLogix only.** Premium FileStorage account (Entra Kerberos) and the `profiles` share. Reached through a private endpoint (DNS zone new, existing or policy-managed) or a service endpoint. |
+| `rg-avd-<env>-<region>-monitor` | **New-workspace mode only.** Log Analytics. Otherwise diagnostics go to your existing workspace, which can be in any subscription. |
 
 ### Existing vs new: the key switches
 
@@ -62,104 +105,124 @@ Resource group names are configurable. Each one can be **created** or **existing
 | `resourceGroups.<role>` | `{ name, create }` for service, hosts, storage, network, monitor |
 | `networkMode` | `existing` (with `existingSessionHostSubnetId` and `existingPrivateEndpointSubnetId`) or `new` (with `outboundMethod` NatGateway/FirewallUdr/None, `dnsServers`, `hubVnetId`) |
 | `logAnalyticsMode` | `existing` (`existingLogAnalyticsWorkspaceId`) or `new` |
-| `privateDnsZoneMode` | `new`, `existing` (`existingFilePrivateDnsZoneId`) or `policyManaged` |
+| `fslogixNetworkAccess` | `privateEndpoint` or `serviceEndpoint` |
+| `privateDnsZoneMode` | `new`, `existing` (`existingFilePrivateDnsZoneId`) or `policyManaged`. Private endpoint mode only. |
 
 > **Subscription rule:** deploy into the subscription that holds the session host VNet. Azure doesn't allow a VM NIC or a private endpoint to use a VNet in a different subscription. The Log Analytics workspace, private DNS zone and hub VNet can be in other subscriptions.
 
+### Repository layout
+
 ```
 docs/
-  questionnaire.md           # fill-in questionnaire (subscriptions, RGs, VNets, ...)
+  questionnaire.md              # fill-in questionnaire (subscriptions, RGs, VNets, ...)
+  firewall-rules.md             # outbound endpoints the hosts need
+  avd-build-map.html            # interactive architecture diagram
 infra/
-  main.bicep                 # subscription-scope entry point
-  main.bicepparam            # example: existing VNet / Log Analytics / central DNS
-  params/                    # generated <env>.bicepparam + <env>.answers.json
+  main.bicep                    # subscription-scope entry point
+  main.bicepparam               # example: existing VNet / Log Analytics / central DNS
+  params/                       # your <env>.bicepparam, <env>.answers.json, <env>.outputs.json
   modules/
-    network.bicep            # new VNet only
-    vnet-peering.bicep       # spoke<->hub peering (hub may be in another subscription)
-    monitoring.bicep
-    hostpool.bicep           # host pool, app group, workspace, scaling plan, diagnostics
-    storage.bicep            # FSLogix Azure Files + Entra Kerberos + private endpoint
-    hosts-rbac.bicep         # VM login roles + AVD power on/off role
-    sessionhost.bicep        # one VM: Entra join -> AVD agent -> FSLogix config
-  scripts/
-    Configure-SessionHost.ps1  # run command: FSLogix + Kerberos registry settings
-scripts/
-  New-AvdParameterFile.ps1   # interactive questionnaire -> infra/params/<env>.bicepparam
-  Deploy-Avd.ps1             # deploy / -WhatIf / -AddHosts / -HostNames / -InfraOnly (Windows PowerShell)
-  Update-SessionHostConfig.ps1  # re-apply FSLogix/Kerberos settings to existing hosts
-  Update-SessionHostDisk.ps1 # change OS disk type/size on existing hosts (drain, deallocate, resize, extend C:)
-  Test-AvdUserAccess.ps1     # read-only: why can't this user see / open the desktop?
-  Set-FslogixStorageAuth.ps1 # one-off Entra app setup for FSLogix (privatelink, consent, CA check)
-  Get-FslogixHostDiagnostics.ps1 # read-only: why won't profiles load on this host?
-  Publish-AvdPoolAutomation.ps1 # publishes the spares/tidy-up runbook (run by Deploy-Avd.ps1)
-  Get-HostDataProtectionReport.ps1 # read-only: which DLP settings are really in effect on a host
-  deploy.sh                  # same, for macOS / Linux
-  Enable-EntraSSO.ps1        # one-off tenant config for Entra SSO
+    hostpool.bicep              # host pool, app group, workspace, scaling plan, diagnostics
+    sessionhost.bicep           # one VM and its build steps (also the template spec)
+    storage.bicep               # FSLogix Azure Files + Entra Kerberos + private/service endpoint
+    network.bicep               # new VNet only
+    vnet-peering.bicep          # spoke<->hub peering (hub may be in another subscription)
+    monitoring.bicep            # new Log Analytics workspace
+    hosts-rbac.bicep            # VM login roles + AVD power on/off role
+    automation.bicep            # pool automation account (+ rg-role, vnet-role, law-role)
+  scripts/                      # run ON the hosts
+    Configure-SessionHost.ps1   # Entra Kerberos, FSLogix (+ Defender exclusions)
+    Customize-SessionHost.ps1   # everything in customizations.json
+    Test-FslogixHost.ps1        # used by Get-FslogixHostDiagnostics.ps1
+    Test-DataProtectionHost.ps1 # used by Get-HostDataProtectionReport.ps1
+  customizations/
+    customizations.json         # build-time customisation settings
+    examples/developer-apps.json  # VS Code, Git, IntelliJ entries
+  automation/
+    Invoke-AvdPoolMaintenance.ps1 # daily spares / tidy-up runbook
+scripts/                        # run on your machine (table above)
+tests/                          # CI: template checks, PowerShell tests, scenario parameter files
 ```
 
-### How "Entra joined, no Intune" is implemented
+### How a session host is built
 
-Each VM has a **system-assigned managed identity**, and the deployment installs these extensions in order:
+Each VM has a **system-assigned managed identity**. Its build runs in this order:
 
-1. **`AADLoginForWindows`**: joins the VM to Microsoft Entra ID. The extension gets **no `mdmId` setting**, so the device is *not* enrolled in Intune.
-2. **Run command**: applies the FSLogix and Entra Kerberos registry settings. Intune would normally push these settings, so here they are set directly. This happens *before* registration, so no user can land on a half-configured host.
-3. **AVD DSC**: installs the AVD agent and registers the VM with the host pool, using `aadJoin: true` and `mdmId: ''`.
+1. **`AADLoginForWindows`** joins the VM to Microsoft Entra ID. The extension gets **no `mdmId` setting**, so the device is *not* enrolled in Intune.
+2. **`GuestAttestation`** runs for Trusted Launch VMs (the default). It reports boot integrity.
+3. **`Configure-SessionHost` run command** applies:
+   - the Entra Kerberos settings;
+   - FSLogix settings and Defender exclusions, when FSLogix is on;
+   - time zone redirection;
+   - turning off Storage Sense.
+4. **`Customize-SessionHost` run command** applies everything in `customizations.json`. Turn it off with `applyCustomizations = false`.
+5. **AVD DSC extension** installs the AVD agent and registers the VM with the host pool (`aadJoin: true`). Users can only land on the host from this point, so they never get a half-built desktop.
+6. **`Restart-AfterBuild`** restarts the VM so the Kerberos and policy settings take effect.
 
-The host pool's RDP properties include `targetisaadjoined:i:1` and, when SSO is enabled, `enablerdsaadauth:i:1`.
+The host pool's RDP properties include:
+- `targetisaadjoined:i:1`;
+- `enablerdsaadauth:i:1` when SSO is on;
+- the device redirection settings.
 
 ## Sizing
 
-| Setting | Value |
-|---|---|
-| Target users | 1,000 |
-| Max sessions per host | 10 |
-| Session hosts | `ceil(1000 / 10)` = **100**, calculated in `main.bicep` |
-| VM size | `Standard_D8s_v5` (8 vCPU / 32 GiB). That is about 1.25 users per vCPU, which leaves plenty of headroom for medium or heavy users |
-| vCPU quota needed | **800 vCPU** of *Standard DSv5 Family* plus the matching *Total Regional vCPUs* |
-| FSLogix share | 10 TiB Premium ZRS, about 13k baseline IOPS. The 30 GB VHDX cap per user is dynamically sized |
+| | Pooled (default) | Personal |
+|---|---|---|
+| Hosts for 1,000 users | `ceil(1000 / 10)` = **100** | **1,000**, one per user |
+| Default VM size | `Standard_D8s_v5` (8 vCPU / 32 GiB, about 1.25 users per vCPU) | `Standard_D4s_v5` (the questionnaire's default for personal) |
+| vCPU quota | **800** (*Standard DSv5 Family* and *Total Regional vCPUs*) | **4,000**, plus spares if pool automation is on |
+| Profiles | FSLogix: 10 TiB Premium ZRS share, 30 GB dynamic VHDX per user | On each VM (FSLogix optional) |
 
-If your users are light task workers, `Standard_D4s_v5` halves the compute cost. Change `vmSize`.
+For light task workers, `Standard_D4s_v5` halves pooled compute cost. Change `vmSize`.
 
 ## Prerequisites
 
-1. Azure CLI 2.60 or later with Bicep (`az bicep upgrade`), and PowerShell 7 (`pwsh`) or Windows PowerShell 5.1 for the questionnaire. The `resource-graph` extension is optional (`az extension add -n resource-graph`) and enables cross-subscription pick lists.
-2. **Owner** or **User Access Administrator + Contributor** on the workload subscription, because the deployment creates role assignments. You also need **Network Contributor** on the hub VNet if the deployment peers a new VNet to it, and **Private DNS Zone Contributor** on a central DNS zone if you use one.
-3. A **vCPU quota increase**: 800 cores of DSv5 in the target region. Request it before you deploy.
-4. An Entra ID **security group of AVD users**, and optionally an admins group.
-5. Check `avdAgentDscPackageUrl` in `main.bicep`. Microsoft periodically publishes a new `Configuration_*.zip`, and the current URL is in the portal's "Add session host" template.
+1. **Tools:**
+   - Azure CLI 2.60 or later with Bicep (`az bicep upgrade`).
+   - Windows PowerShell 5.1 or PowerShell 7.
+   - Optional: the `resource-graph` extension (`az extension add -n resource-graph`) for cross-subscription pick lists.
+   - For `Enable-EntraSSO.ps1`: the Microsoft Graph PowerShell modules (`Install-Module Microsoft.Graph -Scope CurrentUser`).
+2. **Roles:** **Owner**, or **User Access Administrator + Contributor**, on the workload subscription, because the deployment creates role assignments. You also need:
+   - **Network Contributor** on the hub VNet, if the deployment peers to it;
+   - **Private DNS Zone Contributor** on a central DNS zone, if you use one.
+3. **vCPU quota** for the VM family in the target region (see *Sizing*). Request it before you deploy.
+4. **Entra groups:** a security group of AVD users, and optionally an admins group.
+5. **AVD agent package:** check `avdAgentDscPackageUrl` in `main.bicep`. Microsoft periodically publishes a new `Configuration_*.zip`, and the current URL is in the portal's "Add session host" template.
 
 ## Deploy
 
 ### From Windows (PowerShell)
 
-You need the Azure CLI (`winget install -e --id Microsoft.AzureCLI`; open a new terminal afterwards). The scripts work in Windows PowerShell 5.1 and PowerShell 7. If script execution is blocked, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or `Unblock-File` the downloaded scripts.
-
-```powershell
-az login
-```
-
-```powershell
-.\scripts\New-AvdParameterFile.ps1
-```
-
-Preview the changes:
-
 ```powershell
 .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
 ```
-
-Deploy:
 
 ```powershell
 .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam
 ```
 
 `Deploy-Avd.ps1`:
-- reads the subscription from the `// subscriptionId:` line in the parameter file (`-SubscriptionId` overrides it)
-- prompts for the session host local admin password with hidden input, and removes it from the session when it finishes
-- registers any missing resource providers
-- asks you to type `yes` before a real deployment (`-Force` skips this)
-- prints the deployment outputs at the end
+- reads the subscription from the `// subscriptionId:` line in the parameter file (`-SubscriptionId` overrides it);
+- prompts for the session host local admin password with hidden input, unless `$env:AVD_LOCAL_ADMIN_PASSWORD` is set, and removes it from the session when it finishes;
+- checks before deploying, and stops with the fix if one fails:
+  - private DNS zone conflicts;
+  - a missing storage service endpoint (service endpoint mode on an existing VNet);
+  - a custom image that isn't usable (not generalized, wrong generation, not replicated);
+- registers any missing resource providers;
+- asks you to type `yes` before a real deployment (`-Force` skips this);
+- deploys the shared resources, then the session hosts (see *How hosts are deployed*);
+- saves the outputs to `<param file>.outputs.json`, which the other scripts read;
+- sets the desktop name users see (see *Desktop name in Windows App*);
+- publishes the pool automation, if it's on.
+
+Which hosts a run creates:
+
+| Run | Hosts |
+|---|---|
+| plain | Every host the parameter file describes (`targetUserCount`, or `sessionHostCountOverride`) that doesn't exist yet. Existing hosts are skipped. |
+| `-AddHosts N` | N new hosts after the highest existing number |
+| `-HostNames avdsh-021,avdsh-030` | Exactly those hosts, e.g. to retry failures or rebuild a host |
+| `-InfraOnly` | None: shared resources only |
 
 ### From macOS / Linux (bash)
 
@@ -175,49 +238,51 @@ export AVD_LOCAL_ADMIN_PASSWORD='<strong password>'
 ./scripts/deploy.sh infra/params/prod.bicepparam
 ```
 
-The questionnaire looks up the object ID of the **Azure Virtual Desktop** service principal (appId `9cdead84-a844-4324-93f2-b2e6bb768d07`). The deployment grants that principal *Desktop Virtualization Power On Off Contributor*, which autoscale and Start VM on Connect need.
+`deploy.sh` is a plain `az deployment sub create`. Hosts go inside the one deployment, so keep each run to about 50 hosts with `sessionHostCountOverride` and `sessionHostStartIndex`. It doesn't run the pre-flight checks, set the desktop name or publish pool automation.
 
-Session hosts deploy 20 at a time. A full 100-host deployment takes roughly 45–90 minutes.
+### Pilot first, then the rest
 
-### Pilot with one host, then add the rest
-
-1. **Pilot run.** Answer `1` to the questionnaire's *"Hosts to deploy in the first run"*, or set these values in the parameter file:
+1. **Pilot run.** Answer `1` (or a few) to the questionnaire's *"Hosts to deploy in the first run"*, or set this in the parameter file:
    ```bicep
    param sessionHostCountOverride = 1
-   param sessionHostStartIndex = 0
    ```
-   This deploys everything except the other 99 hosts: host pool, app group, workspace, scaling plan, storage, network, RBAC and `avdsh-001`. **The pilot value stays in the file** and caps every later plain run at that number, so change it back to `-1` (step 3) when you scale out. You can test sign-in, SSO, FSLogix profiles and outbound access end to end. The pilot needs only 8 vCPU of quota.
-
-2. **Keep the pilot host on while testing.** Autoscale can power off a single host outside business hours. Tag the VM `ExcludeFromScaling` (the plan's exclusion tag), or set `deployScalingPlan = false` for the pilot run. Start VM on Connect wakes a stopped host when someone signs in either way.
-
-3. **Add the remaining hosts.**
-   ```powershell
-   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -AddHosts 99 -WhatIf
+   This deploys everything else plus one host: host pool, app group, workspace, scaling plan, storage, network and RBAC. Test sign-in, SSO, profiles and outbound access end to end.
+2. **Keep the pilot host on while testing.** Autoscale can power off a host outside business hours. Tag the VM `ExcludeFromScaling` (the plan's exclusion tag). Start VM on Connect wakes a stopped host when someone signs in either way.
+3. **Build the rest.** Set the cap back, then run again:
+   ```bicep
+   param sessionHostCountOverride = -1
    ```
    ```powershell
-   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -AddHosts 99
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
    ```
-   Or set `param sessionHostCountOverride = -1` and run without `-AddHosts`, which creates every host the file describes that doesn't exist yet. `-AddHosts` creates `avdsh-002` to `avdsh-100` and leaves `avdsh-001` untouched. Zone placement continues round-robin, so the final spread is still 34/33/33. Raise the vCPU quota to 800 before this run. There's no batch limit (see *How hosts are deployed* below). A plain run without `-AddHosts` also works: it creates every host the file describes that doesn't exist yet.
-
-   On macOS/Linux with `deploy.sh`, set `sessionHostStartIndex = 1` and `sessionHostCountOverride = 99` in the file instead.
-
-Each run refreshes the host pool registration token, valid long enough for the hosts in that run (at least 8 hours).
+   ```powershell
+   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam
+   ```
+   - **Check the preview first.** Its *This run* line should show the hosts you expect. If the pilot value is still in the file, the run creates nothing and the script says why.
+   - **`-AddHosts N` is an alternative** that leaves the file as it is.
+   - **Quota:** raise it before this run.
+   - **Zones:** hosts are placed round-robin, so 100 hosts end up 34/33/33.
 
 ### How hosts are deployed
 
 `Deploy-Avd.ps1` deploys in two stages:
 
 1. **Shared resources** (host pool, workspace, storage, network, RBAC) in one subscription deployment, with no hosts in it.
-2. **Session hosts.** `infra/modules/sessionhost.bicep` is published as the template spec `avd-sessionhost` (version 1.0) in the service resource group. Each host then gets **its own small deployment** (`avd-host-<vm>-<time>` in the hosts resource group). By default 20 run at a time; change that with `-ThrottleLimit`. The script shows progress and lists any failures at the end.
+2. **Session hosts.**
+   - `infra/modules/sessionhost.bicep` is published as the template spec `avd-sessionhost` (version 1.0) in the service resource group.
+   - Each host then gets **its own small deployment** (`avd-host-<vm>-<time>` in the hosts resource group).
+   - By default 20 run at a time; change that with `-ThrottleLimit`. 20 to 50 works well; compute throttling is the practical limit.
+   - Each host takes about 30 to 60 minutes. The script shows progress and lists any failures at the end.
+   - The host pool registration token is refreshed once at the start, valid long enough for the whole run.
 
-Hosts used to be a copy loop inside the main deployment. ARM repeats the whole host template, including the setup scripts and `customizations.json`, once per host. At around 50 to 100 hosts that passes ARM's 4 MB limit and fails with `DeploymentSizeExceeded`. With one deployment per host, there's no limit on how many hosts a run can create.
+Putting all the hosts in one deployment doesn't work at scale. ARM repeats the whole host template, setup scripts and `customizations.json` included, once per host. At around 50 to 100 hosts that passes ARM's 4 MB limit and fails with `DeploymentSizeExceeded`.
 
 - **A host failed?** Fix the cause (quota, free subnet IPs, image), then retry only those hosts. The script prints the exact command:
   ```powershell
   .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -HostNames avdsh-021,avdsh-030
   ```
 - **Closed the window mid-run?** Deployments already started keep going in Azure. Run the script again: it skips hosts that exist and creates the rest.
-- **deploy.sh / plain `az deployment sub create`** still use the copy loop, so keep those runs to about 50 hosts (`sessionHostCountOverride`).
+- **Gaps are filled.** A plain run creates any **missing** number in the planned range, including hosts you deleted on purpose (or that pool automation deleted). After removing hosts, use `-AddHosts`/`-InfraOnly`, or lower `targetUserCount`, if you don't want them back.
 
 ## Personal (1:1) desktops
 
@@ -270,7 +335,7 @@ The type of an existing host pool can't be changed, so a personal deployment cre
 - **Image:** the default Windows 11 *multi-session* + Microsoft 365 image works for personal pools. For single-session, set `imageReference` to e.g. `MicrosoftWindowsDesktop` / `windows-11` / `win11-24h2-ent` (no Microsoft 365 Apps preinstalled).
 - **Start VM on Connect** is enabled. It needs the AVD service principal's *Power On Off Contributor* role, which the deployment assigns when `avdServicePrincipalObjectId` is set.
 
-## Customising session hosts (apps, optimisation, hardening)
+## Customising session hosts
 
 Each new host is customised **during its build**, after the Entra join and profile configuration and **before** the AVD agent registers it. Users only ever land on finished desktops. Everything is driven by one file, [`infra/customizations/customizations.json`](infra/customizations/customizations.json), and the script [`infra/scripts/Customize-SessionHost.ps1`](infra/scripts/Customize-SessionHost.ps1). Turn it off with `applyCustomizations = false`.
 
@@ -278,6 +343,10 @@ Each new host is customised **during its build**, after the Entra join and profi
 |---|---|
 | `optimize` | Turns off consumer features, tips and the first-logon animation. Removes the built-in Appx packages listed in `removeAppxPackages` (Xbox, Solitaire, Clipchamp, …). Edit the list to keep any you want. |
 | `harden` | Turns off LLMNR, AutoRun and WDigest cleartext credentials. Turns on LSA protection, Defender PUA protection, the firewall (all profiles) and logon auditing. `defenderNetworkProtection: true` adds Defender network protection; test it with your apps first. |
+| `redirection` | Which devices can be redirected into the session. See [Device redirection](#device-redirection-drives-printers-usb-). |
+| `dataProtection` | Blocks personal accounts and other organisations' Microsoft 365. See [Data protection](#data-protection-other-tenants-and-personal-accounts). |
+| `m365Apps` | Removes Teams, OneDrive and optionally Office. See [Microsoft 365 apps](#microsoft-365-apps-teams-onedrive-office). |
+| `defender` | Enforces Microsoft Defender Antivirus settings. See [Microsoft Defender](#microsoft-defender). |
 | `apps` | Downloads and silently installs MSI or EXE installers. **Give a `sha256` for each one**: the script refuses a download whose hash doesn't match. Use `detectPath` to skip apps that are already installed. |
 
 Example `apps` entry:
@@ -326,7 +395,11 @@ Extra fields for installers that need more than a URL:
 .\scripts\Update-SessionHostConfig.ps1 -ParameterFile .\infra\params\prod.bicepparam -Customize -IncludeStopped
 ```
 
-It runs the same script on each host as the `Customize-SessionHost` run command, and the script is safe to re-run. Restart hosts afterwards, out of hours, if an installer or LSA protection needs it. Log on each host: `C:\ProgramData\AvdCustomization\customize.log`.
+It runs the same script on each host as the `Customize-SessionHost` run command, and the script is safe to re-run. Add `-VmName <vm>` to target one host.
+- **Results:** a host is reported **Failed** if any step failed. The script prints each host's own log lines: everything for up to three hosts, otherwise only problems.
+- **Full log on each host:** `C:\ProgramData\AvdCustomization\customize.log`.
+- **Restarts:** restart hosts afterwards, out of hours, if an installer or LSA protection needs it.
+- **Your local copy is what gets pushed.** The script sends your copy of `customizations.json`, so pull the latest repo first.
 
 **Build scripts vs a custom image:**
 
@@ -425,11 +498,19 @@ The default image (`office-365` / `win11-24h2-avd-m365`) includes Microsoft 365 
   ```json
   "m365Apps": { "removeTeams": true, "removeOneDrive": true, "removeOffice": false }
   ```
-  - **Teams:** removes the Teams package for all users and for new profiles, plus the older Teams Machine-Wide Installer if it's present.
-  - **OneDrive:** uninstalls it, removes its sign-in start-up entries, and sets *Prevent the usage of OneDrive for file storage*. OneDrive can't run even if a copy comes back with an update.
+  - **Teams:**
+    - closes any running Teams first, because an app in use can't be removed;
+    - removes the Teams package for all users and for new profiles, plus the older Teams Machine-Wide Installer if it's present;
+    - sets *Don't install Microsoft Teams with Office updates* (`PreventTeamsInstall`) so Office doesn't put it back;
+    - checks afterwards, and reports a failure if Teams is still installed.
+  - **OneDrive:**
+    - closes OneDrive and uninstalls the all-users copy;
+    - removes its start-up entries from every profile (signed in or not) and from the default profile;
+    - sets *Prevent the usage of OneDrive for file storage*, so OneDrive can't run even if a copy remains, for example one a user installed for themselves;
+    - checks afterwards.
   - **Office:** runs Microsoft 365 Apps' own uninstaller silently. It's `false` by default; set it to `true` if users shouldn't have Word, Excel or Outlook either.
 
-  New hosts get this at build. To apply it to existing hosts, run the following. A user who already has a profile may need to sign out and back in.
+  New hosts get this at build. To apply it to existing hosts, run the following. It works while users are signed in; they should sign out and back in afterwards. The output shows `Teams: not installed` and `OneDrive: not installed per-machine; blocked by policy` for each host.
   ```powershell
   .\scripts\Update-SessionHostConfig.ps1 -ParameterFile .\infra\params\prod.bicepparam -Customize -IncludeStopped
   ```
@@ -466,7 +547,7 @@ param defenderForServersPlan = 'P1'   // None | P1 | P2
 - Apply it with `Deploy-Avd.ps1 -InfraOnly`. Defender for Endpoint onboarding happens in the background and can take a few hours after enabling.
 - Check Microsoft's list of supported operating systems for Defender for Endpoint with Defender for Cloud (Windows 11 Enterprise multi-session) before relying on it: [supported platforms](https://learn.microsoft.com/azure/defender-for-cloud/support-matrix-defender-for-servers).
 
-**Check a host:** `Get-HostDataProtectionReport.ps1 -VmName <vm>` now also shows:
+**Check a host:** `Get-HostDataProtectionReport.ps1 -VmName <vm>` also shows:
 - Defender Antivirus status: mode, real-time protection, signature age and tamper protection;
 - whether Defender for Endpoint is onboarded;
 - which Microsoft 365 apps are still installed.
@@ -494,7 +575,7 @@ You can also re-run the questionnaire and choose *gallery*.
 
 `Deploy-Avd.ps1` checks all of this before deploying: definition found, generalized, Gen2 and security type compatible with `vmSecurityType`, and the version replicated to the region. It stops with the reason if not.
 
-**Rolling out a new image.** Changing `imageReference` only affects hosts created afterwards. Azure can't change the image of an existing VM, and `Deploy-Avd.ps1` warns before a run would touch existing hosts.
+**Rolling out a new image.** Changing `imageReference` only affects hosts created afterwards. Azure can't change the image of an existing VM, and `Deploy-Avd.ps1` never rebuilds an existing host unless you name it with `-HostNames`.
 - **Pooled:** run `-AddHosts N` with the new image, set the old hosts to drain mode, and delete them once they're empty. See *Updating an existing deployment*.
 - **Personal:** each user's VM keeps its own image, profile and data. Patch personal VMs in place (Windows Update / your update tooling). A new image is for new desktops. Moving an existing user to a new VM means moving their data, unless OneDrive Known Folder Move or FSLogix holds it.
 
@@ -567,7 +648,8 @@ Deployments are incremental. Resources you remove from the template, or switch o
 | **Change profile size or share path** on existing hosts | Edit the file, then run `Deploy-Avd.ps1 -InfraOnly` (if storage changed) and `Update-SessionHostConfig.ps1 -IncludeStopped`. |
 | **Change the OS disk type or size** | See *Changing the OS disk* below. |
 | **New image, VM size or Windows build** | Replace hosts rather than changing them in place. Run `-AddHosts N` with the new `imageReference` / `vmSize` in the file. In the portal, set the old hosts to drain mode (*Host pool → Session hosts → Turn off new sessions*). Once they're empty, delete them (VM, NIC and disk are removed together). Users never sit on a host that's mid-change. |
-| **Remove hosts** | Drain mode first. When the host has no sessions, delete the VM in the portal and remove the session host from the host pool. Numbers aren't reused unless you set `sessionHostStartIndex` yourself. |
+| **Remove hosts** | Drain mode first. When the host has no sessions, delete the VM in the portal and remove the session host from the host pool. A later **plain** run recreates any missing number up to `targetUserCount`. Lower `targetUserCount`, or use `-AddHosts` / `-InfraOnly` from then on. For personal pools, pool automation can do the tidy-up for you. |
+| **Apply customisation changes** (apps, redirection, data protection, Microsoft 365 apps, Defender) to existing hosts | Edit `customizations.json`, then run `Update-SessionHostConfig.ps1 -Customize -IncludeStopped`. New hosts pick it up automatically. |
 
 ### Changing the OS disk (type or size)
 
@@ -615,7 +697,7 @@ Deployments are incremental. Resources you remove from the template, or switch o
    .\scripts\Deploy-Avd.ps1 -ParameterFile .\infra\params\prod.bicepparam -InfraOnly
    ```
    This saves the new share path into `prod.outputs.json`.
-3. **Do the storage post-deployment steps** (below): admin consent, Conditional Access exclusion, NTFS permissions. Check from one host that `\\<storage>.file.core.windows.net\profiles` resolves to the private IP and opens.
+3. **Do the storage post-deployment steps** (*Post-deployment steps*, 2 to 4): the storage app (consent, Conditional Access exclusion), a restart, and optionally NTFS permissions. Check from one host that `\\<storage>.file.core.windows.net\profiles` resolves to the private IP (or, in service endpoint mode, the public one) and opens.
 4. **Push the FSLogix settings to the existing hosts:**
    ```powershell
    .\scripts\Update-SessionHostConfig.ps1 -ParameterFile .\infra\params\prod.bicepparam -IncludeStopped
@@ -630,11 +712,15 @@ Hosts added later get FSLogix automatically during deployment.
 
 **Fix the cause and re-run the same command. You don't need to start over.** Deployments are idempotent: anything that already succeeded is left as it is, and the run continues from where it stopped. `Deploy-Avd.ps1 -WhatIf` shows what's left to do.
 
-To see why a run failed, find the deployment in the portal (*Subscription → Deployments*), or run:
-
-```powershell
-az deployment sub show --name <deployment name> --query properties.error
-```
+To see why a run failed:
+- **Shared resources:** *Subscription → Deployments* in the portal, or run:
+  ```powershell
+  az deployment sub show --name <deployment name> --query properties.error
+  ```
+- **A session host:** *hosts resource group → Deployments*, named `avd-host-<vm>-<time>`. `Deploy-Avd.ps1` prints the exact command:
+  ```powershell
+  az deployment group show -g <hosts RG> -n <deployment name> --query properties.error
+  ```
 
 Common causes:
 
@@ -655,28 +741,19 @@ Common causes:
 
 No inbound rules are needed. If outbound traffic goes through a firewall (hub firewall mode, or an existing VNet behind one), allow the endpoints in [`docs/firewall-rules.md`](docs/firewall-rules.md) before the pilot. If the Entra join and agent endpoints are blocked, the host deployment fails.
 
-## Post-deployment steps (required)
+## Post-deployment steps
 
-These steps can't be expressed in ARM/Bicep. Run them once after the first deployment that includes FSLogix storage. They apply to every host, current and future.
+These steps can't be expressed in ARM/Bicep. Run each once; they apply to every host, current and future.
 
-1. **Configure the storage account's Entra app.** This is required for profiles to load. Run it as an admin who can manage app registrations:
-   ```powershell
-   .\scripts\Set-FslogixStorageAuth.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
-   ```
-   ```powershell
-   .\scripts\Set-FslogixStorageAuth.ps1 -ParameterFile .\infra\params\prod.bicepparam
-   ```
-   Enabling Entra Kerberos creates an app called `[Storage Account] <name>.file.core.windows.net`. The script configures it to Microsoft's guidance:
-   - **Private link names.** Hosts reach the share through the private endpoint, so DNS returns `<name>.privatelink.file.core.windows.net`. The app needs matching `privatelink` identifier URIs. Without them, Kerberos fails and the mount falls back to NTLM, which gives error **1326**.
-   - **Cloud-only groups.** It adds the `kdc_enable_cloud_group_sids` tag so groups that exist only in Entra ID are included in the Kerberos ticket. This is required for cloud-only identities. Microsoft is moving this to a `kerberosTicket` optional claim (preview). The tag is what the Azure Files and FSLogix guides currently use.
-   - **Admin consent** for the app (`openid`, `profile`, `User.Read`).
-   - **Conditional Access check.** Entra Kerberos doesn't support MFA for the share. The script lists any enabled policy that requires MFA and covers this app. Exclude the app in each one, or mounts fail with error **1327**. The script only reads policies; it doesn't change them.
-2. **Restart the session hosts** that were deployed before this step. New hosts restart automatically at the end of their build, because the Kerberos setting needs a restart.
-3. **Optional: lock down NTFS permissions on the `profiles` share.** By default every authenticated identity has the *Storage File Data SMB Share Contributor* share role (`fslogixDefaultSharePermission`), as FSLogix guidance recommends. Folder permissions then control who sees what. For cloud-only identities, set them in the portal: *Storage account → File shares → profiles → Browse → Manage access*. File Explorer and icacls don't support cloud-only identities. Microsoft's FSLogix recommendation:
-   - **CREATOR OWNER:** Modify, subfolders and files only
-   - **Admins group:** Full control
-   - **Users group:** Modify, this folder only
-4. **Enable Entra SSO for the tenant.** This step is **required if any users are guests**. Members can skip it, but they then get an extra sign-in prompt:
+| Step | When |
+|---|---|
+| 1. Entra SSO for the tenant | Every deployment. Required if any users are guests. |
+| 2. Storage account Entra app | Only with FSLogix (`deployFslogixStorage = true`, the default for pooled) |
+| 3. Restart hosts built before step 2 | Only with FSLogix |
+| 4. NTFS permissions on the share (optional) | Only with FSLogix |
+| 5. Check a host | Recommended |
+
+1. **Enable Entra SSO for the tenant.** Members can work without it, but they get an extra sign-in prompt. Guests can't connect without it.
    ```powershell
    .\scripts\Enable-EntraSSO.ps1 -SessionHostPrefix avdpd
    ```
@@ -685,7 +762,26 @@ These steps can't be expressed in ARM/Bicep. Run them once after the first deplo
    - **Dynamic groups need Entra ID P1.** Without it, create a normal security group, add the session host devices, and pass `-TargetDeviceGroupId <object ID>`.
    - **Finding an existing group's ID:** *Entra ID → Groups → the group → Overview → Object ID*, or run `az ad group show --group "AVD Session Hosts" --query id -o tsv`.
    - **Requirement:** the Microsoft Graph PowerShell modules (`Install-Module Microsoft.Graph -Scope CurrentUser`).
-5. **Check a host:** run `.\scripts\Get-FslogixHostDiagnostics.ps1 -ParameterFile .\infra\params\prod.bicepparam -VmName avdsh-001`. See *Profiles fail to load at sign-in* below.
+2. **Configure the storage account's Entra app** (FSLogix only). Profiles don't load without this. Run it as an admin who can manage app registrations:
+   ```powershell
+   .\scripts\Set-FslogixStorageAuth.ps1 -ParameterFile .\infra\params\prod.bicepparam -WhatIf
+   ```
+   ```powershell
+   .\scripts\Set-FslogixStorageAuth.ps1 -ParameterFile .\infra\params\prod.bicepparam
+   ```
+   Enabling Entra Kerberos creates an app called `[Storage Account] <name>.file.core.windows.net`. The script configures it to Microsoft's guidance:
+   - **Private link names.** With a private endpoint, DNS returns `<name>.privatelink.file.core.windows.net`, so the app needs matching `privatelink` identifier URIs. Without them, Kerberos fails and the mount falls back to NTLM, which gives error **1326**. In service endpoint mode they do no harm.
+   - **Cloud-only groups.** It adds the `kdc_enable_cloud_group_sids` tag so groups that exist only in Entra ID are included in the Kerberos ticket. This is required for cloud-only identities. Microsoft is moving this to a `kerberosTicket` optional claim (preview). The tag is what the Azure Files and FSLogix guides currently use.
+   - **Admin consent** for the app (`openid`, `profile`, `User.Read`).
+   - **Conditional Access check.** Entra Kerberos doesn't support MFA for the share. The script lists any enabled policy that requires MFA and covers this app. Exclude the app in each one, or mounts fail with error **1327**. The script only reads policies; it doesn't change them.
+3. **Restart the session hosts** that were deployed before step 2. New hosts restart automatically at the end of their build.
+4. **Optional: lock down NTFS permissions on the `profiles` share.** By default every authenticated identity has the *Storage File Data SMB Share Contributor* share role (`fslogixDefaultSharePermission`), as FSLogix guidance recommends. Folder permissions then control who sees what. For cloud-only identities, set them in the portal: *Storage account → File shares → profiles → Browse → Manage access*. File Explorer and icacls don't support cloud-only identities. Microsoft's FSLogix recommendation:
+   - **CREATOR OWNER:** Modify, subfolders and files only
+   - **Admins group:** Full control
+   - **Users group:** Modify, this folder only
+5. **Check a host:**
+   - **Profiles:** `.\scripts\Get-FslogixHostDiagnostics.ps1 -ParameterFile .\infra\params\prod.bicepparam -VmName <vm>`. See *Profiles fail to load at sign-in* below.
+   - **Customisation:** `.\scripts\Get-HostDataProtectionReport.ps1 -ParameterFile .\infra\params\prod.bicepparam -VmName <vm>` shows data protection, Defender and the Microsoft 365 apps.
 
 ### Profiles fail to load at sign-in
 
@@ -798,17 +894,62 @@ Then check the client side:
 
 Microsoft supports guests on this design (*AVD authentication → External identity*), with these requirements:
 - **Hosts:** Entra-joined (yes) and running Windows 11 24H2 or later with the 2025-09 cumulative update or later. The marketplace image with `version: 'latest'` meets this.
-- **SSO:** set on the host pool (`enableSingleSignOn = true`, the default) **and** at tenant level (`Enable-EntraSSO.ps1`, post-deployment step 4).
+- **SSO:** set on the host pool (`enableSingleSignOn = true`, the default) **and** at tenant level (`Enable-EntraSSO.ps1`, post-deployment step 1).
 - **Client:** Windows App on Windows, macOS, iOS or Android, or the web client.
 - **Account type:** the guest signs in with an Entra work or school account or a Microsoft account. **Email one-time passcode guests are not supported.**
 - **Licensing:** the guest needs an eligible licence, e.g. Microsoft 365 E3, assigned to their guest object **in this tenant**.
 - **Profiles:** FSLogix on Azure Files authenticates with Entra Kerberos, and it isn't confirmed that guest accounts can get that ticket. With `PreventLoginWithFailure = 1`, a failed profile mount blocks sign-in. Test a guest on the pilot host before rolling out.
 
-## Things you might want to change
+## Testing
+
+`.github/workflows/validate.yml` runs on every push, in three jobs:
+
+- **Bicep** (`tests/test-template.sh`):
+  - compiles and lints `main.bicep`;
+  - builds every scenario parameter file in `tests/params/`: greenfield, hub-spoke with a shared resource group, minimal, personal with pool automation, and service endpoint;
+  - checks the compiled template for the design rules, for example:
+    - Entra join with no Intune `mdmId`, and the agent registering with `aadJoin: true`;
+    - the host count formula and pooled/personal host pool properties;
+    - RDP redirection properties;
+    - pool automation roles, and the per-host deployment output;
+    - Defender for Servers off by default.
+- **PowerShell on Linux** (`tests/Test-PowerShell.ps1`):
+  - parses every script and runs PSScriptAnalyzer;
+  - runs the questionnaire end to end with scripted answers for three scenarios (existing landing zone, new hub-spoke, personal);
+  - compiles the parameter files it writes;
+  - runs every script against a stubbed Azure CLI, checking the commands it sends, the password handling, the per-host deployments, retries, the disk changes and the reports.
+- **PowerShell on Windows**, in both Windows PowerShell 5.1 and PowerShell 7. It runs the same tests, plus checks that need Windows:
+  - dry runs of the customisation script;
+  - every policy value it writes (device redirection, Microsoft account block, Defender, OneDrive) is checked against Windows' own policy definitions (ADMX) on the runner;
+  - the on-host report scripts run for real.
+
+The workflow can't run a real deployment, because there are no Azure credentials in CI. Run `Deploy-Avd.ps1 -WhatIf` against your subscription for that.
+
+## Settings you might want to change
+
+These are in the parameter file unless noted. Apply shared settings with `Deploy-Avd.ps1 -InfraOnly`; settings that live on the hosts need `Update-SessionHostConfig.ps1` or new hosts.
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `loadBalancerType` | `BreadthFirst` | Use `DepthFirst` to pack hosts and maximise autoscale savings |
-| `scalingPlanTimeZone` / schedule | GMT, 07:00–20:00 weekdays | Edit the schedule in `modules/hostpool.bicep` |
-| `imageReference` | Win 11 24H2 multi-session + M365 | Swap in an Azure Compute Gallery image for production |
-| `encryptionAtHost` | `false` | Requires `Microsoft.Compute/EncryptionAtHost` feature registration |
+| `hostPoolType` | `Pooled` | `Personal` for one desktop per user. A new host pool (`…-personal`) is created; see *Personal (1:1) desktops*. |
+| `personalAssignmentType` | `Automatic` | Personal only. `Direct` = you assign with `Set-AvdPersonalAssignment.ps1`. |
+| `targetUserCount` / `maxSessionsPerHost` | 1000 / 10 | Determines the host count |
+| `sessionHostCountOverride` | `-1` | Cap the host count, e.g. for a pilot. Set back to `-1` afterwards. |
+| `sessionHostNamePrefix` | `avdsh` (`avdpd` for personal from the questionnaire) | Can't be changed for existing hosts |
+| `vmSize` | `Standard_D8s_v5` | Existing hosts keep their size; replace them, or resize in the portal |
+| `osDiskType` / `osDiskSizeGB` | `Premium_LRS` / 128 | Existing hosts: `Update-SessionHostDisk.ps1` |
+| `imageReference` | Windows 11 24H2 multi-session + Microsoft 365 Apps | Plain Windows (`windows-11` / `win11-24h2-avd`) or a Compute Gallery image; see *Custom images* |
+| `vmSecurityType` | `TrustedLaunch` | `Standard` for images that can't use Trusted Launch |
+| `availabilityZones` | 1, 2, 3 | Empty for regions without zones |
+| `encryptionAtHost` | `false` | Requires the `Microsoft.Compute/EncryptionAtHost` feature registration |
+| `applyCustomizations` | `true` | Run `customizations.json` during each host's build |
+| `desktopFriendlyName` | `Corporate Desktop` | The name users see in Windows App |
+| `enableSingleSignOn` | `true` | Also needs the tenant step (`Enable-EntraSSO.ps1`) |
+| `loadBalancerType` | `BreadthFirst` | Pooled. `DepthFirst` packs hosts and maximises autoscale savings. |
+| `deployScalingPlan` / `scalingPlanTimeZone` | `true` / GMT | Schedules (weekdays 07:00–20:00) are in `modules/hostpool.bicep` |
+| `deployFslogixStorage` | `true` for pooled, `false` for personal | See *Adding FSLogix profiles after the first deployment* |
+| `fslogixNetworkAccess` | `privateEndpoint` | `serviceEndpoint` if you can't add private DNS records |
+| `fslogixProfileSizeMB` | 30000 | Maximum size of each user's profile disk |
+| `deployPoolAutomation` | `false` | Personal: spare desktops and tidy-up; see *Pool automation* |
+| `defenderForServersPlan` | `None` | `P1`/`P2` for the whole subscription; see *Microsoft Defender* |
+| `customizations.json` | see the file | Optimisation, hardening, redirection, data protection, Microsoft 365 apps, Defender, apps |

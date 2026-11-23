@@ -117,13 +117,15 @@ No **inbound** rules are needed: AVD uses reverse connect. If outbound traffic g
 | 6.0 | Desktop type: **Pooled** (shared multi-session) or **Personal** (1:1, one VM per user) | Pooled | `hostPoolType`. Personal multiplies the VM count and quota: 1,000 users = 1,000 VMs. |
 | 6.0a | *(Personal)* Assignment: **Automatic** (on first connection) or **Direct** (admin assigns) | Automatic | `personalAssignmentType` |
 | 6.1 | Users to support (Pooled: concurrent users; Personal: one desktop each) | `1000` | `targetUserCount` |
-| 6.2 | Users per host | `10` | `maxSessionsPerHost`, which gives 100 hosts |
+| 6.2 | *(Pooled)* Users per host | `10` | `maxSessionsPerHost`, which gives 100 hosts |
 | 6.3 | Typical workload: light / medium / heavy / graphics | | Drives `vmSize` |
-| 6.4 | VM size | `Standard_D8s_v5` | `vmSize`. 100 hosts × 8 vCPU = **800 vCPU of quota** |
+| 6.4 | VM size | `Standard_D8s_v5` (Pooled), `Standard_D4s_v5` (Personal) | `vmSize`. Pooled: 100 hosts × 8 vCPU = **800 vCPU**. Personal: 1,000 × 4 vCPU = **4,000 vCPU**. |
 | 6.5 | Has the vCPU quota been approved in the region? | Yes / No | |
-| 6.6 | Image: Marketplace (Win 11 multi-session + M365) or a Compute Gallery image ID | Marketplace | `imageReference` |
+| 6.6 | Image: Marketplace or a Compute Gallery image ID | Marketplace | `imageReference` |
+| 6.6a | *(Marketplace)* Include Microsoft 365 Apps (Office, Teams, OneDrive)? | Yes | Yes = `office-365` / `win11-24h2-avd-m365`; No = plain `windows-11` / `win11-24h2-avd`. They can also be removed at build (`m365Apps` in `customizations.json`). |
 | 6.7 | Availability zones | 1, 2, 3 | `availabilityZones` |
-| 6.8 | Initial rollout: all hosts, or a pilot of N first? | | `sessionHostCountOverride` |
+| 6.8 | Initial rollout: all hosts, or a pilot of N first? | | `sessionHostCountOverride`. Set back to `-1` to build the rest. |
+| 6.10 | OS disk type and size | Premium SSD, 128 GiB | `osDiskType`, `osDiskSizeGB`. Existing hosts can be changed later with `Update-SessionHostDisk.ps1`. |
 | 6.9 | Is the EncryptionAtHost feature registered on the subscription? | Yes / No | `encryptionAtHost` |
 
 ## 7. Monitoring
@@ -154,8 +156,19 @@ No **inbound** rules are needed: AVD uses reverse connect. If outbound traffic g
 | 9.3 | Deploy an autoscale plan? | Yes | `deployScalingPlan` |
 | 9.4 | Time zone for the schedule (Windows ID) | `GMT Standard Time` | `scalingPlanTimeZone` |
 | 9.5 | Business hours, and any weekend use | Weekdays 07:00–20:00 | Edit the schedules in `modules/hostpool.bicep` |
+| 9.6 | *(Personal)* Keep spare desktops ready and delete unused ones automatically? How many spares, and after how many idle days? | No; 5 spares, 90 days | `deployPoolAutomation`, `spareDesktops`, `deleteUnusedAfterDays`. Set in the parameter file (not asked by the script). |
 
-## 10. Sign-off checklist
+## 10. Security and data protection
+
+| # | Question | Answer | Parameter / notes |
+|---|---|---|---|
+| 10.1 | Defender for Servers on the subscription: **None** (leave as is), **P1** or **P2**? It applies to every VM in the subscription. | None | `defenderForServersPlan`. P1/P2 deploy Defender for Endpoint to each VM. |
+| 10.2 | Are users **guests** from another organisation? Must they be stopped from using their home tenant's Microsoft 365 / OneDrive on the desktop? | | `dataProtection` in `customizations.json`; Tenant Restrictions v2 needs the Entra policy ID |
+| 10.3 | Which device redirections are allowed (drives, printers, USB, clipboard, audio, camera)? | Clipboard, audio, microphone only | `redirection` in `customizations.json` |
+| 10.4 | Remove Teams / OneDrive / Office from the desktops? | Teams and OneDrive removed | `m365Apps` in `customizations.json` |
+| 10.5 | Apps to install on every desktop (installer URL for each) | | `apps` in `customizations.json` (`Add-CustomizationApp.ps1`) |
+
+## 11. Sign-off checklist
 
 - [ ] vCPU quota approved (6.5)
 - [ ] VNet and subnets confirmed in the workload subscription and region (1.3, 4A)
